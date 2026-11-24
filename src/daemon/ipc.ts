@@ -1,28 +1,21 @@
 import { chmodSync, rmSync } from "node:fs";
 import { StringDecoder } from "node:string_decoder";
+import { IPC_MAX_LINE_BYTES, type Outgoing, overCap, pump } from "./ipc-pump";
 
 /** The largest delay `setTimeout` keeps; a longer one is cut to 1 ms with a warning. */
 const MAX_TIMER_MS = 2 ** 31 - 1;
-
-/** Bytes still to go out on a socket whose `write` took only part of them. */
-interface Outgoing {
-	rest: Buffer;
-	/** Close the socket once the last byte is out. */
-	endWhenDone: boolean;
-}
-
-/** Writes what the socket takes now; the `drain` handler calls it again for the rest. */
-function pump(socket: Bun.Socket<unknown>, out: Outgoing): void {
-	if (out.rest.length > 0) out.rest = out.rest.subarray(Math.max(0, socket.write(out.rest)));
-	if (out.rest.length === 0 && out.endWhenDone) socket.end();
-}
 
 interface ServerConnection {
 	/** Decodes across chunk boundaries, so a multibyte character split between two chunks stays whole. */
 	decoder: StringDecoder;
 	buffer: string;
+	/** Bytes of the request line so far, and whether it went over the cap. */
+	bytes: number;
+	dropped: boolean;
 	out: Outgoing;
 }
+
+export { IPC_MAX_LINE_BYTES };
 
 /** One JSON request line in, one JSON response line out, then the connection closes. */
 export type IpcHandler = (request: unknown) => Promise<unknown>;
@@ -44,6 +37,8 @@ export function startIpcServer(path: string, handler: IpcHandler): IpcServer {
 					socket.data = {
 						decoder: new StringDecoder("utf8"),
 						buffer: "",
+						bytes: 0,
+						dropped: false,
 						out: { rest: Buffer.alloc(0), endWhenDone: true },
 					};
 				},
@@ -51,6 +46,11 @@ export function startIpcServer(path: string, handler: IpcHandler): IpcServer {
 					pump(socket, socket.data.out);
 				},
 				data(socket, chunk) {
+					if (overCap(socket.data, chunk, IPC_MAX_LINE_BYTES)) {
+						socket.data.buffer = "";
+						socket.end();
+						return;
+					}
 					socket.data.buffer += socket.data.decoder.write(chunk);
 					const newline = socket.data.buffer.indexOf("\n");
 					if (newline === -1) return;
