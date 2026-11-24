@@ -1907,4 +1907,4 @@ export class OriginMailbox {
 		this.#deps.log.info("epoch_new", { origin: originKey, epoch });
 		store.recordAnswer({ originKey, opRef, threadRef, parts: ["🆕 새 대화를 시작했습니다."] });
 	}
-			}
+}
