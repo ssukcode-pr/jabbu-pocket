@@ -27,7 +27,7 @@ export const DASHBOARD_USAGE = `  dashboard [--port <n>] [--bind 127.0.0.1|::1]
                                  /api/thread/conversation?origin=<key>, a lane's or [TASK]'s change at /api/diff?lane=<name>|task=<id>, what its running turn
                                  is writing at /api/thread/live?origin=<key> (stream: /api/thread/live/events) (also
                                  under a prefix like /task/); --port/--bind override config
-                                 dashboard {port, bind?, herdrWebUrl?, opsStatus?, usageLimits?, peerHomes?}; no port in either → exit 2. With config
+                                 dashboard {port, bind?, herdrWebUrl?, allowedHosts?, opsStatus?, usageLimits?, peerHomes?}; no port in either → exit 2. With config
                                  herdrBoard it also shows the herdr agent board (api/board, api/board/events,
                                  ?card=<key> detail with the pane's conversation, plan and, for a local omp worker, its last turn's waterfall at
                                  /api/pane/trace?card=<key>)
@@ -57,15 +57,14 @@ export async function dashboardCommand(args: string[], homeDir: string): Promise
 	if (values.port !== undefined && !/^\d{1,5}$/.test(values.port)) return usage("--port must be 1-65535");
 	const flagPort = values.port === undefined ? undefined : Number(values.port);
 	if (flagPort !== undefined && (flagPort < 1 || flagPort > 65535)) return usage("--port must be 1-65535");
-	const flagBind = values.bind;
-	if (flagBind !== undefined && !(LOOPBACK as readonly string[]).includes(flagBind)) {
+	if (values.bind !== undefined && !(LOOPBACK as readonly string[]).includes(values.bind)) {
 		return usage("--bind must be 127.0.0.1 or ::1");
 	}
 
 	const config = hasConfig(homeDir) ? loadConfig(homeDir, { checkTokens: false }) : undefined;
 	const port = flagPort ?? config?.dashboard?.port;
 	if (port === undefined) return usage("no port: pass --port or set config dashboard.port");
-	const hostname = flagBind ?? config?.dashboard?.bind ?? "127.0.0.1";
+	const hostname = values.bind ?? config?.dashboard?.bind ?? "127.0.0.1";
 	// Value masking like the daemon's, minus the token files this process does not read.
 	indexEnvSecrets(process.env);
 
@@ -90,6 +89,7 @@ export async function dashboardCommand(args: string[], homeDir: string): Promise
 		server = startDashboardServer({
 			port,
 			hostname,
+			...(config?.dashboard?.allowedHosts === undefined ? {} : { allowedHosts: config.dashboard.allowedHosts }),
 			snapshot,
 			trace: (inboundId) => readTurnTrace(homeDir, inboundId, now(), sessionWhere()),
 			cardTrace: (card) => readCardTrace(card, { ...sessionWhere(), now: now() }),
