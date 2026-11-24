@@ -1099,6 +1099,8 @@ describe("dashboard", () => {
 		expect(loadConfig(home).dashboard).toEqual({ port: 7331, bind: "::1" });
 		writeConfig(baseConfig({ dashboard: { port: 7331, herdrWebUrl: "https://herdr.example.test/" } }));
 		expect(loadConfig(home).dashboard).toEqual({ port: 7331, herdrWebUrl: "https://herdr.example.test/" });
+		writeConfig(baseConfig({ dashboard: { port: 7331, allowedHosts: ["ompbot.example.com"] } }));
+		expect(loadConfig(home).dashboard).toEqual({ port: 7331, allowedHosts: ["ompbot.example.com"] });
 	});
 
 	test.each([
@@ -1107,6 +1109,9 @@ describe("dashboard", () => {
 		[{ port: 70000 }, "dashboard.port"],
 		[{ bind: "127.0.0.1" }, "dashboard.port"],
 		[{ port: 7331, token: "x" }, "dashboard.token"],
+		[{ port: 7331, allowedHosts: ["bad host"] }, "dashboard.allowedHosts"],
+		[{ port: 7331, allowedHosts: "ompbot.example.com" }, "dashboard.allowedHosts"],
+		[{ port: 7331, allowedHosts: ["https://ompbot.example.com/"] }, "dashboard.allowedHosts"],
 		[{ port: 7331, herdrWebUrl: "javascript:alert(1)" }, "dashboard.herdrWebUrl"],
 		[{ port: 7331, herdrWebUrl: 7317 }, "dashboard.herdrWebUrl"],
 		["7331", "field=dashboard"],
