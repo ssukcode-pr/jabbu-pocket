@@ -803,8 +803,13 @@ describe("dashboard server", () => {
 	let stop: (() => void) | undefined;
 	afterEach(() => stop?.());
 
-	async function serve(snapshot: () => Promise<DashboardSnapshot>): Promise<string> {
-		const server = startDashboardServer({ port: 0, hostname: "127.0.0.1", snapshot });
+	async function serve(snapshot: () => Promise<DashboardSnapshot>, allowedHosts?: string[]): Promise<string> {
+		const server = startDashboardServer({
+			port: 0,
+			hostname: "127.0.0.1",
+			...(allowedHosts === undefined ? {} : { allowedHosts }),
+			snapshot,
+		});
 		stop = () => server.stop(true);
 		return `http://127.0.0.1:${server.port}`;
 	}
@@ -819,6 +824,83 @@ describe("dashboard server", () => {
 		expect(await (await fetch(`${base}/ompbot/healthz`)).text()).toBe("ok");
 		const prefixed = await fetch(`${base}/ompbot/`);
 		expect(prefixed.headers.get("content-type")).toContain("text/html");
+	});
+
+	// `fetch` cannot set `Host`; Bun.connect sends the raw request line and headers we want.
+	async function raw(
+		base: string,
+		path: string,
+		headers: Record<string, string>,
+	): Promise<{ status: number; text: string }> {
+		const port = Number(new URL(base).port);
+		const head = Object.entries(headers)
+			.map(([k, v]) => `${k}: ${v}\r\n`)
+			.join("");
+		let text = "";
+		const done = Promise.withResolvers<void>();
+		const socket = await Bun.connect({
+			hostname: "127.0.0.1",
+			port,
+			socket: {
+				open(s) {
+					s.write(`GET ${path} HTTP/1.1\r\n${head}Connection: close\r\n\r\n`);
+				},
+				data(_s, chunk) {
+					text += chunk.toString();
+				},
+				close() {
+					done.resolve();
+				},
+			},
+		});
+		await done.promise;
+		socket.end();
+		return { status: Number(/^HTTP\/1\.1 (\d{3})/.exec(text)?.[1]), text };
+	}
+
+	test("Host check: loopback names pass, any other Host is 421 (DNS rebinding)", async () => {
+		const base = await serve(() => buildSnapshot(deps()));
+		for (const host of ["127.0.0.1", "localhost", "[::1]", `127.0.0.1:${new URL(base).port}`, "LOCALHOST:7331"]) {
+			expect((await raw(base, "/api/snapshot", { Host: host })).status).toBe(200);
+		}
+		for (const host of [
+			"evil.example",
+			`evil.example:${new URL(base).port}`,
+			"127.0.0.1.evil.example",
+			"localhost.evil.example",
+			"[::1",
+			"",
+		]) {
+			const answer = await raw(base, "/api/snapshot", { Host: host });
+			expect(answer.status).toBe(421);
+			expect(answer.text).not.toContain("tasks");
+		}
+		expect((await raw(base, "/healthz", { Host: "evil.example" })).status).toBe(421);
+	});
+
+	test("Host check: allowedHosts adds a tunnel's public name, case-insensitively, and nothing else", async () => {
+		const base = await serve(() => buildSnapshot(deps()), ["Ompbot.Example.com"]);
+		expect((await raw(base, "/api/snapshot", { Host: "ompbot.example.com" })).status).toBe(200);
+		expect((await raw(base, "/api/snapshot", { Host: "OMPBOT.example.com:443" })).status).toBe(200);
+		expect((await raw(base, "/api/snapshot", { Host: "other.example.com" })).status).toBe(421);
+		expect((await raw(base, "/api/snapshot", { Host: "ompbot.example.com.evil.example" })).status).toBe(421);
+	});
+
+	test("Sec-Fetch-Site: a cross-site script request is 403, a cross-site link click and same-origin reads pass", async () => {
+		const base = await serve(() => buildSnapshot(deps()));
+		const host = "127.0.0.1";
+		expect(
+			(await raw(base, "/api/snapshot", { Host: host, "Sec-Fetch-Site": "cross-site", "Sec-Fetch-Mode": "cors" }))
+				.status,
+		).toBe(403);
+		expect((await raw(base, "/api/snapshot", { Host: host, "Sec-Fetch-Site": "cross-site" })).status).toBe(403);
+		expect(
+			(await raw(base, "/", { Host: host, "Sec-Fetch-Site": "cross-site", "Sec-Fetch-Mode": "navigate" })).status,
+		).toBe(200);
+		expect(
+			(await raw(base, "/api/snapshot", { Host: host, "Sec-Fetch-Site": "same-origin", "Sec-Fetch-Mode": "cors" }))
+				.status,
+		).toBe(200);
 	});
 
 	test("AC-6: /api/snapshot is 200 while one herdr host fails", async () => {
