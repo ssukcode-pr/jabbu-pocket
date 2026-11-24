@@ -21,6 +21,7 @@ import {
 	optionalString,
 	requiredString,
 } from "./config-validate";
+import { validAllowedHosts } from "./dashboard/host-guard";
 import type { LaneModelTiers } from "./model-tiers";
 import type { LaneReviewConfident } from "./tasks/auto-land-policy";
 import { TASK_RISKS, type TaskRisk } from "./tasks/docs";
@@ -350,6 +351,8 @@ export interface OmpbotConfig {
 		port: number;
 		bind?: "127.0.0.1" | "::1";
 		herdrWebUrl?: string;
+		/** Extra `Host` names the page answers (a tunnel's public name); `localhost`, `127.0.0.1` and `::1` always pass. */
+		allowedHosts?: string[];
 		opsStatus?: { command: string[]; url?: string };
 		usageLimits?: { omp?: string[][]; agy?: string[]; agyAccount?: string[] };
 		peerHomes?: Array<{ name: string; home: string }>;
@@ -1133,6 +1136,9 @@ export function loadConfig(homeDir: string = defaultHomeDir(), options: { checkT
 		) {
 			invalid(configPath, "dashboard.herdrWebUrl");
 		}
+		if (record.allowedHosts !== undefined && !validAllowedHosts(record.allowedHosts)) {
+			invalid(configPath, "dashboard.allowedHosts");
+		}
 		if (record.opsStatus !== undefined) {
 			const ops = asRecord(record.opsStatus);
 			if (ops === undefined) invalid(configPath, "dashboard.opsStatus");
@@ -1183,18 +1189,8 @@ export function loadConfig(homeDir: string = defaultHomeDir(), options: { checkT
 				if (typeof home !== "string" || !isAbsolute(home)) invalid(configPath, `dashboard.peerHomes.${i}.home`);
 			});
 		}
-		for (const key of Object.keys(record)) {
-			if (
-				key !== "port" &&
-				key !== "bind" &&
-				key !== "herdrWebUrl" &&
-				key !== "opsStatus" &&
-				key !== "usageLimits" &&
-				key !== "peerHomes"
-			) {
-				invalid(configPath, `dashboard.${key}`);
-			}
-		}
+		const dashboardKeys = ["port", "bind", "herdrWebUrl", "allowedHosts", "opsStatus", "usageLimits", "peerHomes"];
+		for (const key of Object.keys(record)) if (!dashboardKeys.includes(key)) invalid(configPath, `dashboard.${key}`);
 	}
 
 	// One address, one listener: a second bind on it fails at start (the daemon logs it and runs on without one).
@@ -1293,4 +1289,4 @@ export function loadConfig(homeDir: string = defaultHomeDir(), options: { checkT
 		if (config.channels.discord !== undefined) readDiscordToken(config);
 	}
 	return config;
-}
+			}
