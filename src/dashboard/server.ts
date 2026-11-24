@@ -9,9 +9,11 @@ import {
 	boardView,
 } from "./board";
 import type { DiffAnswer, DiffSubject } from "./diff";
+import { guardRequest, hostAllowlist } from "./host-guard";
 import { renderDashboardPage } from "./html";
 import type { MonitorDetail } from "./monitor-detail";
 import { proxyPaneGet } from "./proxy";
+import * as route from "./routes";
 import { type DashboardSnapshot, JOB_NAME } from "./snapshot";
 import type { ThreadConversation } from "./thread-conversation";
 import type { TurnTrace } from "./trace";
@@ -35,6 +37,8 @@ export interface DashboardServerOptions {
 	port: number;
 	/** Loopback only (`127.0.0.1` or `::1`); outside exposure is a tunnel with access control in front. */
 	hostname: string;
+	/** Extra `Host` names (a tunnel's public name) besides loopback; any other `Host` is 421. */
+	allowedHosts?: readonly string[];
 	snapshot: () => Promise<DashboardSnapshot>;
 	/** Hears a snapshot that could not be built (answered as 500). */
 	onError?: (error: unknown) => void;
@@ -82,21 +86,6 @@ export interface DashboardServerOptions {
  * A tunnel may mount the dashboard under a prefix (`/task/…`); every API route matches with or without one. The page
  * itself is `/` or a one-segment prefix only, and never `/api/` or `/healthz/`: any other path ending in `/` is a 404.
  */
-const PAGE = /^\/(?:(?!(?:api|healthz)\/)[^/]+\/)?$/;
-const SNAPSHOT = /^\/(?:.*\/)?api\/snapshot$/;
-const HEALTH = /^\/(?:.*\/)?healthz$/;
-const BOARD = /^\/(?:.*\/)?api\/board$/;
-const BOARD_EVENTS = /^\/(?:.*\/)?api\/board\/events$/;
-const PANE = /^\/(?:.*\/)?api\/pane\/(conversation|plan|trace)$/;
-const JOB_TRACE = /^\/(?:.*\/)?api\/job\/trace$/;
-const TRACE = /^\/(?:.*\/)?api\/turn\/(\d{1,15})\/trace$/;
-const THREAD_CONVERSATION = /^\/(?:.*\/)?api\/thread\/conversation$/;
-const MONITOR_DETAIL = /^\/(?:.*\/)?api\/monitor\/detail$/;
-const DIFF = /^\/(?:.*\/)?api\/diff$/;
-const THREAD_LIVE = /^\/(?:.*\/)?api\/thread\/live$/;
-const THREAD_LIVE_EVENTS = /^\/(?:.*\/)?api\/thread\/live\/events$/;
-const MANIFEST = /^\/(?:.*\/)?manifest\.webmanifest$/;
-const ICON = /^\/(?:.*\/)?icons\/(icon-192|icon-512|icon-maskable-512|apple-touch-icon)\.png$/;
 const KEEP_ALIVE_MS = 15_000;
 
 /** Web app manifest for "install as app" in Chrome/Edge; URLs are relative so any tunnel prefix keeps working. */
@@ -328,6 +317,7 @@ function liveFanout(
 export function startDashboardServer(options: DashboardServerOptions): Server<undefined> {
 	const now = options.now ?? Date.now;
 	const board = options.board;
+	const allowedHosts = hostAllowlist(options.allowedHosts);
 	const panel = (): BoardPanel | undefined => {
 		if (board === undefined) return undefined;
 		const state = board.source.current();
@@ -356,6 +346,8 @@ export function startDashboardServer(options: DashboardServerOptions): Server<un
 		idleTimeout: 60,
 		async fetch(request) {
 			const head = request.method === "HEAD";
+			const refused = guardRequest(request, allowedHosts, COMMON_HEADERS);
+			if (refused !== undefined) return refused;
 			if (request.method !== "GET" && !head) {
 				return new Response("method not allowed\n", {
 					status: 405,
@@ -368,16 +360,16 @@ export function startDashboardServer(options: DashboardServerOptions): Server<un
 				});
 			const url = new URL(request.url);
 			const { pathname } = url;
-			if (HEALTH.test(pathname)) return reply("ok", "text/plain; charset=utf-8");
-			if (MANIFEST.test(pathname)) return reply(WEB_MANIFEST, "application/manifest+json; charset=utf-8");
-			const icon = ICON.exec(pathname);
+			if (route.HEALTH.test(pathname)) return reply("ok", "text/plain; charset=utf-8");
+			if (route.MANIFEST.test(pathname)) return reply(WEB_MANIFEST, "application/manifest+json; charset=utf-8");
+			const icon = route.ICON.exec(pathname);
 			if (icon !== null) {
 				const file = Bun.file(new URL(`./icons/${icon[1]}.png`, import.meta.url));
 				return new Response(head ? null : file, {
 					headers: { ...COMMON_HEADERS, "content-type": "image/png", "cache-control": "max-age=86400" },
 				});
 			}
-			const trace = TRACE.exec(pathname);
+			const trace = route.TRACE.exec(pathname);
 			if (trace !== null) {
 				heard("trace");
 				if (options.trace === undefined) return jsonReply({ error: "trace_disabled" }, 404, head);
@@ -390,7 +382,7 @@ export function startDashboardServer(options: DashboardServerOptions): Server<un
 				}
 				return jsonReply(answer, answer.ok ? 200 : 404, head);
 			}
-			if (JOB_TRACE.test(pathname)) {
+			if (route.JOB_TRACE.test(pathname)) {
 				heard("trace");
 				if (options.jobTrace === undefined) return jsonReply({ error: "trace_disabled" }, 404, head);
 				const name = url.searchParams.get("name") ?? "";
@@ -404,8 +396,8 @@ export function startDashboardServer(options: DashboardServerOptions): Server<un
 				}
 				return jsonReply(answer, answer.ok ? 200 : 404, head);
 			}
-			const liveEvents = THREAD_LIVE_EVENTS.test(pathname);
-			if (liveEvents || THREAD_LIVE.test(pathname)) {
+			const liveEvents = route.THREAD_LIVE_EVENTS.test(pathname);
+			if (liveEvents || route.THREAD_LIVE.test(pathname)) {
 				if (options.live === undefined || live === undefined) return jsonReply({ error: "live_disabled" }, 404, head);
 				const origin = (url.searchParams.get("origin") ?? "").trim();
 				if (origin === "") return jsonReply({ error: "invalid_origin" }, 400, head);
@@ -426,7 +418,7 @@ export function startDashboardServer(options: DashboardServerOptions): Server<un
 					return jsonReply({ error: "daemon_unreachable" }, 503, head);
 				}
 			}
-			if (THREAD_CONVERSATION.test(pathname)) {
+			if (route.THREAD_CONVERSATION.test(pathname)) {
 				heard("conversation");
 				if (options.conversation === undefined) return jsonReply({ error: "conversation_disabled" }, 404, head);
 				let answer: ThreadConversation;
@@ -447,7 +439,7 @@ export function startDashboardServer(options: DashboardServerOptions): Server<un
 						)
 					: jsonReply({ error: answer.error }, 404, head);
 			}
-			if (MONITOR_DETAIL.test(pathname)) {
+			if (route.MONITOR_DETAIL.test(pathname)) {
 				heard("monitor_detail");
 				if (options.monitorDetail === undefined) return jsonReply({ error: "monitor_detail_disabled" }, 404, head);
 				const id = (url.searchParams.get("id") ?? "").trim();
@@ -461,7 +453,7 @@ export function startDashboardServer(options: DashboardServerOptions): Server<un
 				}
 				return answer.ok ? jsonReply(answer, 200, head) : jsonReply({ error: answer.error }, 404, head);
 			}
-			if (DIFF.test(pathname)) {
+			if (route.DIFF.test(pathname)) {
 				heard("diff");
 				if (options.diff === undefined) return jsonReply({ error: "diff_disabled" }, 404, head);
 				const lane = url.searchParams.get("lane") ?? "";
@@ -476,15 +468,15 @@ export function startDashboardServer(options: DashboardServerOptions): Server<un
 				}
 				return answer.ok ? jsonReply(answer, 200, head) : jsonReply({ error: answer.error }, 404, head);
 			}
-			const pane = PANE.exec(pathname);
-			if (BOARD.test(pathname) || BOARD_EVENTS.test(pathname) || pane !== null) {
+			const pane = route.PANE.exec(pathname);
+			if (route.BOARD.test(pathname) || route.BOARD_EVENTS.test(pathname) || pane !== null) {
 				if (board === undefined || fanout === undefined) return jsonReply({ error: "board_disabled" }, 404, head);
-				if (BOARD.test(pathname)) {
+				if (route.BOARD.test(pathname)) {
 					// Built per request, never cached: a new TASK shows on its card at once.
 					const current = boardPanel();
 					return current.ok ? jsonReply(current, 200, head) : jsonReply({ error: current.error }, 503, head);
 				}
-				if (BOARD_EVENTS.test(pathname)) {
+				if (route.BOARD_EVENTS.test(pathname)) {
 					return head
 						? new Response(null, {
 								headers: { ...COMMON_HEADERS, "content-type": "text/event-stream; charset=utf-8" },
@@ -516,8 +508,8 @@ export function startDashboardServer(options: DashboardServerOptions): Server<un
 				);
 				return head ? new Response(null, { status: proxied.status, headers: proxied.headers }) : proxied;
 			}
-			const isPage = PAGE.test(pathname);
-			if (!isPage && !SNAPSHOT.test(pathname)) {
+			const isPage = route.PAGE.test(pathname);
+			if (!isPage && !route.SNAPSHOT.test(pathname)) {
 				return new Response("not found\n", {
 					status: 404,
 					headers: { ...COMMON_HEADERS, "content-type": "text/plain; charset=utf-8" },
