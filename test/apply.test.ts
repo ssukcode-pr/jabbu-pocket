@@ -2045,6 +2045,21 @@ describe("runApply code rollback in a real git repository (AC-2..AC-5)", () => {
 		expect(readFileSync(join(home, "autoland.hold"), "utf8")).toContain("push 실패");
 	});
 
+	test("AC-4: a hold that cannot be written does not stop the rollback; the failure is in the detail", async () => {
+		initRepo();
+		// A directory where the hold file goes: the atomic rename onto it fails, whatever the user running the test.
+		mkdirSync(join(home, "autoland.hold"));
+		const world = failingWorld();
+		const { deps } = repoDeps(world);
+		const { receipt } = await runApply(base, deps);
+		expect(restartCommands(world)).toHaveLength(3);
+		expect(codeStep(receipt)?.ok).toBe(true);
+		expect(codeStep(receipt)?.detail).toContain("autoland.hold write failed");
+		expect(codeStep(receipt)?.detail).not.toContain("autoland.hold written");
+		// What the sweepers read: an unreadable hold still holds auto-merge (fail closed).
+		expect(readAutoLandHold(home)).toContain("autoland.hold unreadable");
+	});
+
 	test("deps AC-4: the code rollback installs through ensureDeps and leaves the marker of the reverted tree", async () => {
 		initRepo({ lockChanges: true });
 		const badHash = depsHash(repo);
