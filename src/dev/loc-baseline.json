@@ -37,7 +37,7 @@
 	"src/core/mailbox-thread-context.ts": 167,
 	"src/core/mailbox-types.ts": 602,
 	"src/core/mailbox-undo.ts": 219,
-	"src/core/mailbox.ts": 1937,
+	"src/core/mailbox.ts": 1924,
 	"src/core/normalize.ts": 205,
 	"src/core/origin-key.ts": 70,
 	"src/core/origin.ts": 249,
