@@ -25,7 +25,6 @@ import { byteLength, redact } from "../redact";
 import { injectionWarning, scanForInjection } from "../safety/injection";
 import { peerTouchedTurnNotice } from "../safety/prompt";
 import type { InboundRow, OriginRow } from "../store/db-rows";
-import type { UncertainReason } from "../store/transitions";
 import { typicalTurnDuration } from "../store/turn-duration";
 import { classifyFailure } from "./failure-kind";
 import { type IdleKeepDeps, IdleKeeper, type IdleSweepContext } from "./idle-keep";
@@ -44,6 +43,7 @@ import {
 	STEER_BEFORE_ANSWER_SEEN_NOTE,
 	turnPeerOf,
 } from "./mailbox-notices";
+import { markOrPark, parkUncertain } from "./mailbox-park";
 import { purposeBlockOf, runPurposeCommand, setHome } from "./mailbox-purpose";
 import {
 	OWN_ANSWER_LINE,
@@ -981,33 +981,6 @@ export class OriginMailbox {
 		return isAutonomousRow(this.#deps.originKey, row) && this.#deps.isFrozen?.() === true;
 	}
 
-	/**
-	 * The steer went out but its outcome is unknown (it threw, the turn ended around it, or the ledger write failed):
-	 * the row is parked as `uncertain` instead of replayed, so no input runs twice. Resolves true — this row is done,
-	 * later rows still go out; the owner closes or retries it with `/queue`.
-	 */
-	#parkUncertain(row: InboundRow, reason: UncertainReason, error?: unknown): boolean {
-		const { store, log, originKey } = this.#deps;
-		store.markUncertain(row.platformMessageId, reason);
-		log.warn("inbound_uncertain", {
-			origin: originKey,
-			id: row.platformMessageId,
-			reason,
-			...(error === undefined ? {} : { error: String(error) }),
-		});
-		return true;
-	}
-
-	/** Records a delivered row as dispatched; a failed ledger write parks it as `uncertain` (never re-sent): false. */
-	#markOrPark(row: InboundRow, input: { opRef: string; entryCursor: string | null }): boolean {
-		try {
-			this.#deps.store.markDispatched(row.platformMessageId, input);
-			return true;
-		} catch (error) {
-			return !this.#parkUncertain(row, "dispatch_record_failed", error);
-		}
-	}
-
 	/** Returns false when the row was left pending (nothing was sent). */
 	async #dispatch(row: InboundRow, text: string = row.textRef): Promise<boolean> {
 		const { store, log, originKey } = this.#deps;
@@ -1060,10 +1033,10 @@ export class OriginMailbox {
 			try {
 				await driver.steer(composeTurnPrompt(blocks, text));
 			} catch (error) {
-				return this.#parkUncertain(row, "steer_threw", error);
+				return parkUncertain(this.#deps, row, "steer_threw", error);
 			}
-			if (ended() !== undefined) return this.#parkUncertain(row, "turn_ended_after_steer");
-			if (!this.#markOrPark(row, { opRef: turn.opRef, entryCursor })) return true;
+			if (ended() !== undefined) return parkUncertain(this.#deps, row, "turn_ended_after_steer");
+			if (!markOrPark(this.#deps, row, { opRef: turn.opRef, entryCursor })) return true;
 			log.info("steer_delivered", {
 				origin: originKey,
 				id: row.platformMessageId,
@@ -1254,7 +1227,7 @@ export class OriginMailbox {
 		// The child already runs this turn: a failed ledger write stops it, so no run goes on untracked.
 		let recorded = false;
 		try {
-			recorded = this.#markOrPark(row, { opRef, entryCursor });
+			recorded = markOrPark(this.#deps, row, { opRef, entryCursor });
 		} finally {
 			if (!recorded) await this.#stopDriver().catch(() => undefined);
 		}
@@ -1934,4 +1907,4 @@ export class OriginMailbox {
 		this.#deps.log.info("epoch_new", { origin: originKey, epoch });
 		store.recordAnswer({ originKey, opRef, threadRef, parts: ["🆕 새 대화를 시작했습니다."] });
 	}
-}
+			}
