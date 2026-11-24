@@ -1289,4 +1289,4 @@ export function loadConfig(homeDir: string = defaultHomeDir(), options: { checkT
 		if (config.channels.discord !== undefined) readDiscordToken(config);
 	}
 	return config;
-			}
+}
