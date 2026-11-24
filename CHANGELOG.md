@@ -4,6 +4,9 @@
 
 ## Unreleased
 
+- 현황판: `Host` 헤더가 `localhost`·`127.0.0.1`·`::1`(포트 무관)이 아니면 421로 답합니다(DNS rebinding으로 다른 이름의 웹 페이지가 현황판을 읽는 길을 막음). 터널의 공개 이름은 새 설정 `dashboard.allowedHosts`에 넣어야 합니다. 터널로 쓰던 설치본은 이 키를 넣고 `systemctl --user restart ompbot-dashboard`를 해야 계속 열립니다. 또 `Sec-Fetch-Site: cross-site`인 비-이동(스크립트) 요청은 403입니다. 링크 클릭 같은 이동 요청은 그대로 열립니다.
+- 데몬 IPC 소켓: 요청 한 줄이 16 MiB(바이트)를 넘으면 줄바꿈이 왔든 안 왔든 버리고 연결을 닫습니다.
+
 ## 0.1.0 — 2026-11-24
 
 - jabbu-pocket 첫 공개판입니다. 이전 이름 kencrew의 0.5.0을 이어받았고, 아래는 그 뒤에 바뀐 것입니다.
