@@ -1,13 +1,16 @@
 import type { BoardCard, BoardPanel } from "./board";
 import type { DashboardSnapshot, TaskInfo } from "./snapshot";
+import { type TurnGroup, turnOf } from "./turn";
 
-export type InboxCol = "attention" | "working" | "wait";
+/** An entry's group as {@link turnOf} judges it without read marks (never `read`). */
+export type InboxCol = TurnGroup;
 
-/** One inbox card: an agent pane (with its TASK merged in), or an open TASK no pane carries. */
+/** One inbox row: an agent pane (with its TASK merged in), or an open TASK no pane carries (`orphan`: the live board lacks its pane). */
 export interface InboxEntry {
 	id: string;
 	kind: "card" | "task";
 	col: InboxCol;
+	orphan?: boolean;
 	since: number;
 	title: string;
 	machine: string;
@@ -30,8 +33,8 @@ export function cardWithSay(s: DashboardSnapshot | null | undefined, card: Board
 }
 
 /**
- * The inbox cards of a snapshot and the live board, each in its column; no search, no order. Self-contained apart from
- * `cardWithSay` (shipped to the page).
+ * The inbox rows of a snapshot and the live board, each with its group ({@link turnOf}, no read marks); no search, no
+ * order. Self-contained apart from `cardWithSay`/`turnOf` (shipped to the page).
  */
 export function inboxEntries(s: DashboardSnapshot, live?: BoardPanel | null): InboxEntry[] {
 	const board = live?.ok ? live : undefined;
@@ -40,36 +43,14 @@ export function inboxEntries(s: DashboardSnapshot, live?: BoardPanel | null): In
 		return Number.isNaN(ms) ? 0 : ms;
 	};
 	const tasks = s.tasks.ok ? s.tasks.items : [];
-	const trouble = (task: TaskInfo): boolean => task.status === "blocked" || task.error !== undefined;
-	const lone = (task: TaskInfo): InboxCol => {
-		// While the board is live, an open TASK whose pane is not on it has lost its agent: the owner should look.
-		if (board !== undefined || trouble(task)) return "attention";
-		const herdr = task.herdr;
-		if (herdr !== undefined && !herdr.ok) {
-			if (herdr.error !== "herdr is not configured") return "attention";
-			return task.status === "review" ? "wait" : "working";
-		}
-		if (herdr !== undefined && herdr.status !== "working" && herdr.status !== "idle" && herdr.status !== "done") {
-			return "attention";
-		}
-		if (task.status === "review") return "wait";
-		return herdr === undefined || herdr.status === "working" ? "working" : "wait";
-	};
 	const entries: InboxEntry[] = [];
 	for (const boardCard of board?.cards ?? []) {
 		const card = cardWithSay(s, boardCard);
 		const task = card.taskId === undefined ? undefined : tasks.find((item) => item.taskId === card.taskId);
-		// A finished pane, with or without a TASK, goes to 완료·대기; only trouble or a blocked pane asks the owner.
-		const col: InboxCol =
-			card.column === "attention" || (task !== undefined && trouble(task))
-				? "attention"
-				: card.column === "working"
-					? "working"
-					: "wait";
 		entries.push({
 			id: card.key,
 			kind: "card",
-			col,
+			col: "done",
 			since: card.since,
 			title: task?.title || card.paneLabel,
 			machine: card.machineName,
@@ -83,29 +64,32 @@ export function inboxEntries(s: DashboardSnapshot, live?: BoardPanel | null): In
 		entries.push({
 			id: task.taskId,
 			kind: "task",
-			col: lone(task),
+			col: "done",
 			since: msOf(task.progress?.updated) || msOf(task.updatedAt),
 			title: task.title,
 			machine: task.host,
 			taskId: task.taskId,
 			task,
+			// While the board is live, an open TASK whose pane is not on it has lost its agent: the owner should look.
+			...(board === undefined ? {} : { orphan: true }),
 		});
 	}
+	for (const entry of entries) entry.col = turnOf(entry).group;
 	return entries;
 }
 
-/** How long an idle or finished pane with no TASK sits in 완료·대기 before it counts as 방치. Shipped to the page. */
+/** How long an idle or finished pane with no TASK sits in 확인함 before it counts as 방치. Shipped to the page. */
 export const STALE_MS = 24 * 3_600_000;
 
 /**
- * A 방치 entry: a herdr pane in 완료·대기 tied to no TASK (no merged TASK and no `taskId`, so a TASK pane stays out
+ * A 방치 entry: a herdr pane in 확인함 tied to no TASK (no merged TASK and no `taskId`, so a TASK pane stays out
  * while the TASK list cannot be read), in that state for `STALE_MS` or since an unknown time (`since` 0). Self-contained
  * apart from `STALE_MS` (shipped beside it).
  */
 export function isStale(entry: InboxEntry, now: number): boolean {
 	return (
 		entry.kind === "card" &&
-		entry.col === "wait" &&
+		entry.col === "done" &&
 		entry.task === undefined &&
 		entry.taskId === "" &&
 		(entry.since === 0 || now - entry.since >= STALE_MS)
@@ -113,22 +97,16 @@ export function isStale(entry: InboxEntry, now: number): boolean {
 }
 
 /**
- * The 확인 필요 group of an entry: 0 failed (TASK documents not judged, worker check failed or gone, unknown pane state),
- * 1 blocked, 2 the rest (no agent card…). Self-contained (shipped).
+ * The 내 차례 order key of an entry, from its {@link turnOf} word: 0 failed (확인 필요), 1 stuck or asking (판정 막힘,
+ * 질문, 막힘, 승인 대기), 2 the rest (결정 대기…). Self-contained apart from `turnOf` (shipped).
  */
 export function attentionGroup(entry: InboxEntry): number {
-	const task = entry.task;
-	const card = entry.card;
-	const herdr = task?.herdr;
-	if (task?.error !== undefined || (herdr !== undefined && (!herdr.ok || herdr.status === "gone")) || card?.unknown) {
-		return 0;
-	}
-	if (task?.status === "blocked" || card?.status === "blocked") return 1;
-	return 2;
+	const word = turnOf(entry).word;
+	return word === "확인 필요" ? 0 : ["판정 막힘", "질문", "막힘", "승인 대기"].includes(word) ? 1 : 2;
 }
 
 /**
- * The one 확인 필요 order: group, then the longest wait first (an unknown since, 0, after every known one), then id.
+ * The one 내 차례 order: group, then the longest wait first (an unknown since, 0, after every known one), then id.
  * Self-contained apart from `attentionGroup`.
  */
 export function byAttention(a: InboxEntry, b: InboxEntry): number {
@@ -141,36 +119,13 @@ export function byAttention(a: InboxEntry, b: InboxEntry): number {
 }
 
 /**
- * The 확인 필요 entries in the one order the next line, the number badges and keys and the tab title use; never
+ * The 내 차례 entries in the one order the next line, the number badges and keys and the tab title use; never
  * filtered by the search. Self-contained apart from `inboxEntries`/`byAttention` (shipped beside it).
  */
 export function inboxAttention(s: DashboardSnapshot, live?: BoardPanel | null): InboxEntry[] {
 	return inboxEntries(s, live)
-		.filter((entry) => entry.col === "attention")
+		.filter((entry) => entry.col === "mine")
 		.sort(byAttention);
-}
-
-/** Why the owner should look at a 확인 필요 entry, failure first, cut at 120 characters. Self-contained (shipped). */
-export function inboxNextReason(entry: InboxEntry, live: boolean): string {
-	const { task, card } = entry;
-	const herdr = task?.herdr;
-	const reason =
-		task?.error ??
-		(herdr !== undefined && !herdr.ok
-			? herdr.error
-			: herdr?.status === "gone"
-				? "워커 사라짐"
-				: card?.unknown
-					? `알 수 없는 상태 ${card.status || "?"}`
-					: task?.progress?.blockedReason
-						? task.progress.blockedReason
-						: card?.status === "blocked"
-							? (card.question ?? card.blocked ?? "에이전트 입력 대기")
-							: entry.kind === "task" && live
-								? "에이전트 카드 없음"
-								: "확인 필요");
-	const text = task?.overlap === undefined ? reason : `${reason} · ${task.overlap}`;
-	return text.length > 120 ? `${text.slice(0, 119)}…` : text;
 }
 
 /** The tab icon for a state: the brand mark, the same with a red dot (확인 필요), all grey (이상). Self-contained. */

@@ -568,10 +568,11 @@ describe("agent board", () => {
 			"m-ssh:w9:p2": undefined,
 		});
 		const page = await (await fetch(`${base}/`)).text();
-		expect(page).toContain('data-card="w1:p1" data-row="w1:p1"><p class="card-eyebrow">T-20261104-07 · oci</p>');
+		const row = page.slice(page.indexOf('data-card="w1:p1" data-row="w1:p1">'));
+		expect(row.slice(0, row.indexOf("</a>"))).toMatch(/<span class="t2"><span>(?:[^<]* · )?T-20261104-07<\/span>/);
 	});
 
-	test("마지막 지시: a card gets its name's newest prompt (local cards local rows only) and the page draws the line", async () => {
+	test("마지막 지시: a card gets its name's newest prompt (local cards local rows only); only the detail panel draws it", async () => {
 		home = makeHome("jabbu-board-");
 		const dbPath = join(home.dir, "jabbu.db");
 		expect(readBoardPrompts(home.dir)).toEqual([]);
@@ -614,9 +615,10 @@ describe("agent board", () => {
 			.cards[0];
 		expect(named?.lastPrompt).toEqual({ preview: "원격 다른 호스트 리마인더", at: at0 + 5 * 60_000, kind: "remind" });
 
+		// The worker brief is no part of the inbox row (two lines: title, then state and reason).
 		const html = renderDashboardMain(SNAPSHOT, view, at0 + 4 * 60_000);
-		expect(html).toContain('<p class="card-prompt">마지막 지시 · 3분 전: 로컬 후속 지시</p>');
-		expect(html.match(/class="card-prompt"/g)).toHaveLength(1);
+		expect(html).not.toContain("로컬 후속 지시");
+		expect(html).not.toContain("마지막 지시");
 		const local = view.cards.find((card) => card.key === "w1:p1");
 		expect(renderDetailHead("w1:p1", local, undefined, at0 + 4 * 60_000)).toContain(
 			'<section class="detail-say" aria-label="마지막 지시"><h3 class="h3">마지막 지시</h3><p class="lead">로컬 후속 지시</p><p class="note-sub">3분 전</p></section>',
@@ -634,7 +636,7 @@ describe("agent board", () => {
 			{ ...view, cards: [{ ...remote, lastPrompt: named?.lastPrompt }] },
 			now,
 		);
-		expect(remind).toContain("마지막 지시 · 리마인더 · ");
+		expect(remind).not.toContain("원격 다른 호스트 리마인더");
 	});
 
 	test("AC-9: without a board the page keeps the herdr agent list block and no board block", async () => {

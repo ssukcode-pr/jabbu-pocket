@@ -1,12 +1,13 @@
 import type { JabbuConfig } from "../config";
 import { landModeOf } from "../lanes/manager-pr-land";
-import { defaultPrTools, type PrTools } from "../lanes/pr";
+import { defaultPrTools, type ProcRunner, type PrTools } from "../lanes/pr";
 import { failureOf } from "../lanes/pr-land-steps";
 import type { LanePrLand } from "../lanes/pr-land-types";
 import { defaultGit, type GitRunner } from "../lanes/verify";
 import { redact } from "../redact";
 import { baseBranchOf, isAncestor, precondition, rejudge, type TaskLandDeps } from "./land";
 import { landModeOfRow, type Prepared, type RemoteLandEnv, remoteIntegrityBase } from "./land-remote";
+import { bunRunner, refreshTlaCovered } from "./land-tla-covered";
 import type { TaskRow } from "./ledger";
 import type { TaskLandRecord } from "./ledger-schema";
 
@@ -59,6 +60,7 @@ export async function prepareLocal(
 	tools: PrTools,
 	remote: string,
 	saved: LanePrLand | undefined,
+	run: ProcRunner = bunRunner,
 ): Promise<Prepared> {
 	const git = deps.git ?? defaultGit;
 	const refused = await precondition(git, row);
@@ -86,6 +88,21 @@ export async function prepareLocal(
 			return {
 				rework: { reason: `\`${tracking}\` merge 충돌`, notice, prLand: { ...prev, bounces: (prev.bounces ?? 0) + 1 } },
 				sha,
+				baseBranch,
+			};
+		}
+		// The base's own change to a TLA+-covered file stales the gate record, not the task's work: re-record when the model holds.
+		const refreshed = await refreshTlaCovered(row.worktree, git, run);
+		if (refreshed.kind === "stop") return { stop: refreshed.reason };
+		if (refreshed.kind === "rework") {
+			const prev = saved ?? { branch: row.branch };
+			return {
+				rework: {
+					reason: "기준 브랜치 병합 뒤 TLA+ 모델 검사 실패",
+					notice: refreshed.notice,
+					prLand: { ...prev, bounces: (prev.bounces ?? 0) + 1 },
+				},
+				sha: await tipOf(),
 				baseBranch,
 			};
 		}

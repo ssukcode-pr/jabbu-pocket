@@ -16,6 +16,8 @@ bun run check     # biome + tsc
 
 ## PR을 보내기 전에
 
+- 코드를 고치면 먼저 [설계 코어](docs/architecture.md)를 읽어 주세요. 코어 불변식(§3)과 보호 구역(§4)을 건드리는 PR은 거기 적힌 검사를 같이 돌립니다.
+- PR 하나에는 한 가지 일만 담고, 머지 전에 최신 `main`을 합쳐 CI를 다시 돌립니다([동시 PR 규칙](docs/architecture.md#6-여러-pr이-동시에-들어올-때)).
 - `bun test`와 `bun run check`가 모두 통과해야 합니다.
 - 동작을 바꾸면 그 동작을 확인하는 테스트를 같은 PR에 넣어 주세요. 문구만 바꾼 변경에는 테스트가 필요 없습니다.
 - 설정 키·명령·출력 형식이 바뀌면 [docs/guide.md](docs/guide.md)도 같이 고쳐 주세요.

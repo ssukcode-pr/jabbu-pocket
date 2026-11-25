@@ -32,8 +32,21 @@ jobs:
       - run: bun run check
       - run: bun run knip
       - run: bun test --parallel=3
+      # Mailbox TLA+ model (spec/tla/mailbox): --strict fails instead of skipping when Java is missing. Only the
+      # pinned tla2tools.jar is cached; the script checks its sha256 either way.
+      - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/jabbu-pocket/tla2tools-v1.7.4.jar
+          key: tla2tools-v1.7.4-936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88
+      - name: TLA+ mailbox model
+        run: bun scripts/tla-check.ts --strict
 
-  # Same steps as `test` on the arm64 image the daemon runs on (OCI aarch64). Not a required check.
+  # The test job's steps without the TLA+ model check, on the arm64 image the daemon runs on (OCI aarch64).
+  # Not a required check.
   test-arm64:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 15

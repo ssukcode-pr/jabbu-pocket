@@ -1,6 +1,7 @@
 import { closeSync, existsSync, fsyncSync, openSync, readFileSync, renameSync, rmSync, writeSync } from "node:fs";
 import { join } from "node:path";
-import { type DriverFactory, discardRefusedLaunches, openOriginSession, sessionToResume } from "../core/mailbox";
+import { type DriverFactory, openOriginSession, sessionToResume } from "../core/mailbox";
+import { settleDeadProcessRows } from "../core/mailbox-sending";
 import { COMMAND_OP_REF, CONTINUE_ID_PREFIX, isTurnPromptFor, promptTextOf } from "../core/types";
 import { isClosedLaneQuestion } from "../lanes/trigger";
 import type { Logger } from "../log";
@@ -172,12 +173,11 @@ function finalAnswerParts(entries: readonly OmpEntry[], promptText: string, last
 
 /**
  * Startup rule (2): every `dispatched` row of the dead process either has its final answer in the omp session after
- * the row's `entry_cursor` (-> answered + delivery) or gets exactly one interrupted notice. Prompts are never resent.
- * Exception: a conversation turn the planned restart cut (its op_ref is in {@link RESTART_CUT_FILE}) gets one resume
- * row `cut-<id>` in the same thread and {@link CONTINUE_NOTICE} instead — once: a turn of a resume row, a monitor
- * origin, a command op (`COMMAND_OP_REF`), a closed [TASK]'s turn, a closed lane's work turn (its worktree is gone;
- * question turns still resume) or an op_ref not in a fresh record is interrupted. A launch-refused row (`refused:`) is discarded silently.
- * Rows that were steered into the same turn share an `op_ref` and are settled together by the first row's lookup.
+ * its `entry_cursor` (-> answered + delivery) or gets one interrupted notice; prompts are never resent. A `sending`
+ * row turns `uncertain`, a `refused:` row is discarded (`settleDeadProcessRows`). A turn a planned restart cut (op_ref
+ * in {@link RESTART_CUT_FILE}) gets one resume row `cut-<id>` and {@link CONTINUE_NOTICE} instead, once: a resume row's
+ * turn, a monitor origin, a command op (`COMMAND_OP_REF`), a closed [TASK]'s or lane work turn (lane questions resume)
+ * or an op_ref not in a fresh record is interrupted. Steered rows share an `op_ref`, settled by the first row's lookup.
  */
 export async function recoverDispatched(deps: RecoveryDeps): Promise<RecoveryResult> {
 	const { store, log } = deps;
@@ -190,7 +190,7 @@ export async function recoverDispatched(deps: RecoveryDeps): Promise<RecoveryRes
 		cutTurns ??= readRestartCut(homeDir, (deps.now ?? Date.now)(), log);
 		return cutTurns;
 	};
-	discardRefusedLaunches(store, log);
+	settleDeadProcessRows(store, log);
 	const byOrigin = new Map<string, Map<string, InboundRow[]>>();
 	for (const row of store.listInbound({ state: "dispatched" })) {
 		const opRef = row.opRef ?? `row:${row.platformMessageId}`;

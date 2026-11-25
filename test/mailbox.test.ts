@@ -570,12 +570,13 @@ describe("mailbox: prompt vs steer", () => {
 		await untilFinal(mailbox, second, () => second.release());
 	});
 
-	test("a ledger that fails both the dispatch write and the park write still stops the started child; the row stays pending", async () => {
+	test("a ledger that fails both the dispatch write and the park write still stops the started child; the row stays sending until a resume parks it", async () => {
 		driverOptions = { holdTurns: true };
 		const a = msg("first");
 		store.markDispatched = () => {
 			throw new Error("disk full");
 		};
+		const markUncertain = store.markUncertain.bind(store);
 		store.markUncertain = () => {
 			throw new Error("disk full");
 		};
@@ -583,7 +584,16 @@ describe("mailbox: prompt vs steer", () => {
 		const first = drivers[0] as SteerFailingDriver;
 		expect(first.calls.filter((call) => call.startsWith("prompt:"))).toEqual(["prompt:first"]);
 		await expect(first.prompt("x")).rejects.toThrow("not started");
-		expect(store.getInbound(a.platformMessageId)?.state).toBe("pending");
+		// The prompt may have reached the child: the write-ahead keeps the row out of every drain (never re-sent).
+		expect(store.getInbound(a.platformMessageId)?.state).toBe("sending");
+		store.markUncertain = markUncertain;
+		await router.mailbox(ORIGIN).resumePending();
+		expect(store.getInbound(a.platformMessageId)).toMatchObject({
+			state: "uncertain",
+			uncertainReason: "send_interrupted",
+		});
+		expect(first.calls.filter((call) => call.startsWith("prompt:"))).toEqual(["prompt:first"]);
+		expect(drivers).toHaveLength(1);
 	});
 
 	test("the turn ending while a steer's leafId call is in flight: nothing was sent, the message runs as a new turn (#61)", async () => {

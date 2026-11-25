@@ -565,16 +565,20 @@ describe("owner review link in a flow", () => {
 		expect(renderFlowChain({ ...reviewing, discordHref: href }, "T-1", true)).toContain(button);
 	});
 
-	test("the inbox card of a TASK waiting for review opens the thread without nesting a link", async () => {
+	test("a TASK waiting for review opens the thread from its detail panel; the two-line inbox row carries no link", async () => {
 		const snapshot = await buildSnapshot(deps());
 		if (!snapshot.flows?.ok) throw new Error("no flows");
 		const flows = snapshot.flows.items.map((item) => (item.threadRef === "A" ? { ...item, discordHref: href } : item));
-		const inbox = renderDashboardPage({ ...snapshot, flows: { ok: true, items: flows } }, {});
+		const withHref = { ...snapshot, flows: { ok: true as const, items: flows } };
+		const inbox = renderDashboardPage(withHref, {});
 		const cardOf = (id: string) =>
 			new RegExp(`<a class="card[^"]*"[^>]*data-row="${id}"[\\s\\S]*?</a>`).exec(inbox)?.[0] ?? "";
-		// T-A3 waits for review; T-A2 in the same thread is still being built.
-		expect(cardOf("T-A3")).toContain(`<span class="card-discord" data-open="${href}">디스코드에서 보기 ↗</span>`);
-		expect(cardOf("T-A2")).not.toContain("card-discord");
+		// T-A3 waits for review; the row is one link with no nested one.
+		expect(cardOf("T-A3")).not.toContain("디스코드에서 보기");
+		const detail = renderDashboardPage(withHref, { task: "T-A3" });
+		expect(detail.slice(detail.indexOf('<aside id="detail"'))).toContain(
+			`<p class="flow-review"><a class="button" href="${href}"`,
+		);
 	});
 
 	test("no link without a review TASK or without a Discord thread", () => {

@@ -2,17 +2,9 @@ import { typicalNote } from "../store/turn-duration";
 import type { BoardPanel } from "./board";
 import { discordThreadHref, renderFlowChain } from "./detail";
 import { hostChecksLevel, repoCountsText } from "./host-checks";
-import {
-	attentionGroup,
-	byAttention,
-	type InboxCol,
-	type InboxEntry,
-	inboxEntries,
-	inboxNextReason,
-	isStale,
-} from "./inbox";
+import { byAttention, type InboxEntry, inboxEntries, isStale } from "./inbox";
 import { contextBar, costCardBody } from "./load-view";
-import type { DashboardSnapshot, JobInfo, MonitorInfo, TaskInfo } from "./snapshot";
+import type { DashboardSnapshot, JobInfo, MonitorInfo } from "./snapshot";
 import {
 	APPROVAL_OUTCOMES,
 	alertText,
@@ -25,6 +17,7 @@ import {
 	openTurnsText,
 	TURN_LABELS,
 } from "./text";
+import { type Turn, type TurnGroup, turnOf } from "./turn";
 import { resetIn, trendHtml, usageLevel } from "./usage-forecast";
 
 /** What the page is showing besides the data: the chosen view, the search text, the list order, the open entry and theme. */
@@ -188,25 +181,34 @@ export function renderDashboardMain(
 	const unreadDot = (id: string): string =>
 		unread.has(id) ? '<span class="unread-dot" title="안 읽음" role="img" aria-label="안 읽음"></span>' : "";
 
-	// ---- the inbox: one entry per agent pane, plus the open TASKs no pane carries ----
-	type Col = InboxCol;
+	// ---- the inbox: one row per agent pane, plus the open TASKs no pane carries; `turnOf` alone groups them ----
 	type Entry = InboxEntry;
 	const tasks = s.tasks.ok ? s.tasks.items : [];
 	const entries = inboxEntries(s, live);
-	const RANK: Record<Col, number> = { attention: 0, working: 1, wait: 2 };
-	// 확인 필요 keeps the one order (longest wait first); the other columns show the newest first.
+	const turns = new Map(entries.map((entry) => [entry.id, turnOf(entry, unread.has(entry.id))]));
+	const turnFor = (entry: Entry): Turn => turns.get(entry.id) ?? turnOf(entry);
+	/** The groups top to bottom: label and how many rows show before 더 보기 (0 = all). */
+	const GROUPS: Array<[TurnGroup, string, number]> = [
+		["mine", "내 차례", 0],
+		["working", "진행 중", 5],
+		["read", "읽을 것", 3],
+		["done", "확인함", 3],
+	];
+	const RANK: Record<TurnGroup, number> = { mine: 0, working: 1, read: 2, done: 3 };
+	const groupOf = (entry: Entry): TurnGroup => turnFor(entry).group;
+	// 내 차례 keeps the one order (longest wait first); the other groups show the newest first.
 	const byDefault = (a: Entry, b: Entry): number =>
-		RANK[a.col] - RANK[b.col] || (a.col === "attention" ? byAttention(a, b) : b.since - a.since);
-	// The 방치 filter lives on the inbox and list only; its chip counts before the search.
+		RANK[groupOf(a)] - RANK[groupOf(b)] || (groupOf(a) === "mine" ? byAttention(a, b) : b.since - a.since);
+	// The 방치 filter lives on the inbox and list only; its chip counts before the search. Filter and search dim the
+	// rows they leave out instead of dropping them, so nothing moves under the pointer and every count stays whole.
 	const staleOn = ui.stale === true && (view === "inbox" || view === "list");
 	const staleCount = entries.filter((entry) => isStale(entry, clock)).length;
-	const shown = entries.filter(
-		(entry) =>
-			(!staleOn || isStale(entry, clock)) &&
-			hit(entry.title, entry.taskId, entry.machine, entry.card?.paneLabel, entry.card?.name),
-	);
-	// The next line and the tab count use every 확인 필요 entry, whatever the search hides.
-	const attention = entries.filter((entry) => entry.col === "attention").sort(byAttention);
+	const hitOf = (entry: Entry): boolean =>
+		(!staleOn || isStale(entry, clock)) &&
+		hit(entry.title, entry.taskId, entry.machine, entry.card?.paneLabel, entry.card?.name);
+	const hits = entries.filter(hitOf).length;
+	// The next line and the tab count use every 내 차례 entry, whatever the search dims.
+	const attention = entries.filter((entry) => entry.col === "mine").sort(byAttention);
 	const next = attention[0];
 	const signalBad = !s.daemon.ok || !s.daemon.running || (board !== undefined && !board.ok);
 	const closed = staleOn ? [] : tasks.filter((task) => !task.open && hit(task.title, task.taskId, task.host));
@@ -215,95 +217,42 @@ export function renderDashboardMain(
 		entry.kind === "card"
 			? `href="?card=${esc(encodeURIComponent(entry.id))}" data-card="${esc(entry.id)}"`
 			: `href="?task=${esc(encodeURIComponent(entry.id))}" data-task="${esc(entry.id)}"`;
-	const badgesOf = (entry: Entry): string => {
-		const task = entry.task;
-		const out: string[] = [];
-		// A TASK card shows the TASK's state only; the agent's own state goes in the foot as text (`workerOf`). A
-		// `working` TASK whose agent finished sits in 완료·대기 until the sweep judges its outcome: "판정 대기", not 진행 중.
-		if (task !== undefined) {
-			out.push(task.status === "working" && entry.col === "wait" ? badge("판정 대기", "") : state(task.status));
-		} else if (entry.card?.unknown) out.push(badge(`알 수 없음 · ${entry.card.status || "?"}`, "is-warning"));
-		else if (entry.card !== undefined) out.push(state(entry.card.status));
-		if (isStale(entry, clock)) out.push(badge("방치", ""));
-		if (task !== undefined && entry.card === undefined && task.open) {
-			const herdr = task.herdr;
-			if (herdr !== undefined && !herdr.ok) out.push(badge("워커 확인 실패", "is-danger"));
-			else if (herdr?.status === "gone") out.push(badge("워커 사라짐", "is-danger"));
-			else if (live !== undefined) out.push(badge("에이전트 카드 없음", "is-warning"));
-		}
-		if (task?.error !== undefined) out.push(badge("문서 판정 실패", "is-danger"));
-		if (task?.typical !== undefined && (task.elapsedMs ?? 0) > task.typical.p90Ms) {
-			out.push(badge("평소보다 길어짐", "is-warning"));
-		}
-		return out.join("");
-	};
-	const summaryOf = (entry: Entry): string => {
-		const task = entry.task;
-		const said = entry.card;
-		// What the pane itself says comes first: its question or why it is blocked, a finished pane's last answer.
-		if (said?.status === "blocked" && said.question) return `묻는 말: ${said.question}`;
-		if (said?.status === "blocked" && said.blocked) return said.blocked;
-		if (said?.status === "done" && said.taskId === undefined && said.lastSay) return said.lastSay;
-		const parts: string[] = [];
-		if (task?.progress?.current) parts.push(task.progress.current);
-		if (task?.progress?.blockedReason) parts.push(`막힌 이유: ${task.progress.blockedReason}`);
-		if (task?.error) parts.push(task.error);
-		if (task?.herdr !== undefined && !task.herdr.ok && entry.card === undefined) parts.push(task.herdr.error);
-		if (parts.length > 0) return parts.join(" · ");
-		if (entry.card !== undefined) {
-			return [entry.card.workspaceLabel, entry.card.tabLabel, entry.card.cwd ?? ""].filter((part) => part).join(" · ");
-		}
-		return task === undefined ? "" : `PROGRESS 없음 · ${task.branch}`;
-	};
-	const progressOf = (task: TaskInfo): string[] => [
-		`AC ${task.acChecked ?? "-"}/${task.acTotal}`,
-		`단계 ${task.stepsDone === undefined ? "-" : `${task.stepsDone}/${task.stepsTotal ?? "-"}`}`,
-	];
-	const workerOf = (entry: Entry): string => {
-		const card = entry.card;
-		if (entry.task === undefined || card === undefined) return "";
-		const label = card.unknown ? `알 수 없음(${card.status || "?"})` : (STATES[card.status]?.[0] ?? card.status);
-		return `<span class="card-worker">워커 ${esc(label)}</span>`;
-	};
-	const stateKeyOf = (entry: Entry): string => `${entry.col}:${entry.card?.status ?? ""}:${entry.task?.status ?? ""}`;
+	const stateKeyOf = (entry: Entry): string =>
+		`${groupOf(entry)}:${entry.card?.status ?? ""}:${entry.task?.status ?? ""}`;
+	/** A row's mark (`!` for 내 차례, the rest drawn by the style). */
+	const markOf = (entry: Entry): string =>
+		`<span class="mk" aria-hidden="true">${turnFor(entry).mark === "!" ? "!" : ""}</span>`;
+	/** A row's one state word (방치 says so in place of the word). */
+	const wordOf = (entry: Entry): string =>
+		`<b class="tw">${esc(isStale(entry, clock) ? "방치" : turnFor(entry).word)}</b>`;
 	/**
-	 * A TASK waiting for the owner's review opens its request thread on Discord from the card. The card is a link, so
-	 * this is a span the click handler opens in a new tab (`data-open`), not a nested link.
+	 * One inbox row, two lines: the question or the title, then `저장소 · TASK`, the state word, the worker model and one
+	 * reason; the age at the end. A 내 차례 row carries its number on screen (1…9, `order`). Worker briefs and the
+	 * judge's own wording stay in the detail panel.
 	 */
-	const reviewLinkOf = (entry: Entry): string => {
-		if (entry.task?.status !== "review" || !s.flows?.ok) return "";
-		const href = s.flows.items.find((chain) => chain.tasks.some((step) => step.taskId === entry.taskId))?.discordHref;
-		return href ? `<span class="card-discord" data-open="${esc(href)}">디스코드에서 보기 ↗</span>` : "";
-	};
-	/** One inbox card; a 확인 필요 card carries its number on screen (1…9, `order`) and the next line's mark. */
-	const cardOf = (entry: Entry, order = 0): string => {
-		const eyebrow = entry.taskId ? `${entry.taskId} · ${entry.machine}` : entry.machine;
-		const meta = entry.task !== undefined ? progressOf(entry.task) : [entry.card?.agent ?? ""];
+	const rowOf = (entry: Entry, order = 0): string => {
+		const turn = turnFor(entry);
+		const task = entry.task;
+		const where = [task?.repo, entry.taskId || entry.machine].filter((part) => part).join(" · ");
+		const [model = "", effort] = (task?.workerModel ?? "").split(":");
+		const modelText = model === "" ? "" : `${model.split("/")[0]}${effort ? ` · ${effort}` : ""}`;
+		const slow = task?.typical !== undefined && (task.elapsedMs ?? 0) > task.typical.p90Ms;
 		const isNext = next !== undefined && next.kind === entry.kind && next.id === entry.id;
-		const classes = `card${isSel(entry.id) ? " is-selected" : ""}${isNext ? " is-next" : ""}${
-			entry.col === "attention" && attentionGroup(entry) === 0 ? " is-fail" : ""
-		}${unread.has(entry.id) ? " is-unread" : ""}`;
+		// Rows the search or the 방치 filter leaves out are dimmed, and so is a 방치 row while the filter is off.
+		const classes = `card trow is-${turn.group}${isSel(entry.id) ? " is-selected" : ""}${isNext ? " is-next" : ""}${
+			hitOf(entry) && (staleOn || !isStale(entry, clock)) ? "" : " is-dim"
+		}`;
 		return `<a class="${classes}" data-state="${esc(stateKeyOf(entry))}" ${linkOf(entry)} data-row="${esc(entry.id)}"${
 			order > 0 ? ` data-order="${order}"` : ""
-		}${isSel(entry.id) ? ' aria-current="true"' : ""}><p class="card-eyebrow">${
+		}${isSel(entry.id) ? ' aria-current="true"' : ""}>${markOf(entry)}<span class="t1">${
 			order > 0 ? `<span class="order-no">${order}</span>` : ""
-		}${unreadDot(entry.id)}${esc(eyebrow)}</p><p class="card-title">${esc(entry.title)}</p><p class="card-sum">${esc(summaryOf(entry))}</p>${
-			entry.card?.status === "blocked" && entry.card.question && (entry.card.options ?? []).length > 0
-				? `<p class="card-options">${(entry.card.options ?? []).map((option) => esc(option)).join(" / ")}</p>`
-				: ""
-		}${
-			entry.card?.lastPrompt
-				? `<p class="card-prompt">마지막 지시 · ${entry.card.lastPrompt.kind === "remind" ? "리마인더 · " : ""}${ago(
-						entry.card.lastPrompt.at,
-					)}: ${esc(entry.card.lastPrompt.preview)}</p>`
-				: ""
-		}<div class="card-foot"><span class="badges">${badgesOf(entry)}</span>${workerOf(entry)}${reviewLinkOf(entry)}<span class="card-time">${ago(
-			entry.since,
-		)}</span><span class="card-meta">${meta.map((part) => `<span>${esc(part)}</span>`).join("")}</span>${
-			isNext ? '<span class="next-tag">다음</span>' : ""
-		}</div></a>`;
+		}${unreadDot(entry.id)}${esc(turn.line)}</span><span class="t2">${where === "" ? "" : `<span>${esc(where)}</span>`}${wordOf(
+			entry,
+		)}${modelText === "" ? "" : `<small>${esc(modelText)}</small>`}<span>${esc(
+			turn.reason,
+		)}</span>${slow ? "<small>평소보다 길어짐</small>" : ""}</span><span class="card-time">${ago(entry.since)}</span></a>`;
 	};
-	/** The next line: the first 확인 필요 entry (search or not), why, where and how long; a quiet line when none. */
+	/** The next line: the first 내 차례 entry (search or not), why, where and how long; a quiet line when none. */
 	const nextLine = (): string => {
 		if (next === undefined) {
 			return `<p class="next-quiet">${signalBad ? "다음 · 상태 모름 — 갱신 끊김" : "다음 · 기다리는 항목 없음"}</p>`;
@@ -319,12 +268,13 @@ export function renderDashboardMain(
 						: minutes < 1440
 							? [String(Math.floor(minutes / 60)), "시간"]
 							: [String(Math.floor(minutes / 1440)), "일"];
-		const title = next.title.length > 24 ? `${next.title.slice(0, 23)}…` : next.title;
+		const line = turnFor(next).line;
+		const title = line.length > 24 ? `${line.slice(0, 23)}…` : line;
 		const where = [next.machine, next.task?.branch || next.taskId].filter((part) => part).join(" · ");
 		const reply = next.card?.replyUrl;
 		return `<div class="next-line"><a class="next-up" ${linkOf(next)}><span class="next-label">다음</span><span class="next-title">${esc(
 			title,
-		)}</span><span class="next-why">${esc(inboxNextReason(next, live !== undefined))}${
+		)}</span><span class="next-why">${esc([turnFor(next).reason, next.task?.overlap ?? []].flat().join(" · "))}${
 			where === "" ? "" : ` · ${esc(where)}`
 		}</span><span class="next-wait"><b>${amount}</b>${unit}</span></a>${
 			reply
@@ -379,11 +329,11 @@ export function renderDashboardMain(
 			count === undefined ? "" : `<span class="count-chip">${esc(count)}</span>`
 		}${extra}${clearBtn}</div>`;
 
-	const COLS: Array<[Col, string, string, string]> = [
-		["attention", "확인 필요", "확인할 항목이 없어요", "막히거나 오너 결정이 필요한 작업이 생기면 여기에 모입니다."],
-		["working", "진행 중", "진행 중인 작업이 없어요", "에이전트가 작업을 시작하면 실시간으로 카드가 표시됩니다."],
-		["wait", "완료·대기", "완료·대기 항목이 없어요", "작업이 끝나거나 검토 대기 상태가 되면 여기에 표시됩니다."],
-	];
+	/** The four group counts, the same line on the inbox and the list. */
+	const groupSum = `<p class="badges group-sum">${GROUPS.map(
+		([id, label]) =>
+			`<a class="chip" href="#col-${id}">${esc(label)} <b>${entries.filter((entry) => groupOf(entry) === id).length}</b></a>`,
+	).join("")}</p>`;
 	const inboxView = (): string => {
 		const machines =
 			live === undefined
@@ -393,25 +343,26 @@ export function renderDashboardMain(
 							badge(`${machine.name}${machine.connected ? "" : " · 끊김"}`, machine.connected ? "" : "is-danger"),
 						)
 						.join("")}</div>`;
-		const chips = COLS.map(
-			([id, label]) =>
-				`<a class="chip" href="#col-${id}">${esc(label)} <b>${shown.filter((entry) => entry.col === id).length}</b></a>`,
-		).join("");
-		const columns = COLS.map(([id, label, none, hint]) => {
-			const cards = shown.filter((entry) => entry.col === id).sort(byDefault);
-			// Numbers go to the 확인 필요 cards on screen (after the search), 1…9 without gaps.
-			const body =
-				cards.length === 0
-					? `<div class="col-empty-wrap"><p class="col-empty">${esc(none)}</p><p class="col-empty-sub">${esc(hint)}</p></div>`
-					: cards.map((entry, index) => cardOf(entry, id === "attention" && index < 9 ? index + 1 : 0)).join("");
-			// Below the head, not in it: the unread count of the cards on screen and a button that reads them all.
+		const columns = GROUPS.map(([id, label, keep]) => {
+			const cards = entries.filter((entry) => groupOf(entry) === id).sort(byDefault);
+			// Numbers go to the 내 차례 rows the search leaves lit, 1…9 without gaps.
+			let order = 0;
+			const drawn = cards.map((entry) => rowOf(entry, id === "mine" && hitOf(entry) && order < 9 ? ++order : 0));
+			const rest = keep === 0 ? [] : drawn.splice(keep);
+			// `id` keeps the fold open across the redraw, like 최근 닫힘.
+			const more =
+				rest.length === 0
+					? ""
+					: `<details class="closed" id="more-${id}"><summary>더 보기 <span class="count-chip">${rest.length}</span></summary>${rest.join("")}</details>`;
+			const body = `${drawn.join("")}${more}`;
+			// Below the head, not in it: the unread count of the rows and a button that reads them all.
 			const unreadCount = cards.filter((entry) => unread.has(entry.id)).length;
 			const unreadLine =
 				unreadCount === 0
 					? ""
 					: `<div class="col-unread"><span>안 읽음 <b>${unreadCount}</b></span><button type="button" class="button is-ghost is-sm" data-mark-read="${id}">모두 읽음</button></div>`;
 			const recent =
-				id !== "wait" || closed.length === 0
+				id !== "done" || closed.length === 0
 					? ""
 					: `<details class="closed" id="closed"><summary>최근 닫힘 <span class="count-chip">${closed.length}</span></summary>${closed
 							.map(
@@ -421,7 +372,7 @@ export function renderDashboardMain(
 									)}</b> ${esc(task.title)} · ${esc(STATES[task.status]?.[0] ?? task.status)} ${at(task.closedAt)}</a>`,
 							)
 							.join("")}</details>`;
-			return `<section class="col" id="col-${id}" aria-label="${esc(label)}"${
+			return `<section class="grp" id="col-${id}" aria-label="${esc(label)}"${
 				cards.length === 0 && recent === "" ? " data-empty" : ""
 			}><h2 class="col-head"><span>${esc(
 				label,
@@ -464,13 +415,9 @@ export function renderDashboardMain(
 									.join("")
 							: `<div class="notice is-danger">${badge("herdr 조회 실패", "is-danger")}<span>${esc(herdr.error)}</span><span class="notice-next">다음 행동: 로컬 herdr 실행 파일과 데몬 설정을 확인하세요(<code>jabbu-pocket doctor</code>).</span></div>`
 					}</section>`;
-		// The head names what it counts: the 진행 중 column, the same number as the side nav.
-		const working = shown.filter((entry) => entry.col === "working").length;
-		const top = `${head("에이전트 인박스", undefined, `<span class="view-sum">진행 중 <b>${working}</b></span>${staleHead}${machines}`)}${banners.join("")}${nextLine()}`;
-		if ((q !== "" || staleOn) && shown.length === 0 && closed.length === 0) return `${top}${nothing}${agents}`;
-		return `${top}${
-			shown.length === 0 ? nothing : ""
-		}<nav class="col-chips" aria-label="열로 이동">${chips}</nav><div class="inbox">${columns}</div>${agents}`;
+		// The head's 확인 필요 is the 내 차례 rows, the same number as the tab title.
+		const top = `${head("에이전트 인박스", undefined, `<span class="view-sum">확인 필요 <b>${attention.length}</b></span>${staleHead}${machines}`)}${banners.join("")}${nextLine()}`;
+		return `${top}${hits === 0 ? nothing : ""}${groupSum}<div class="groups">${columns}</div>${agents}`;
 	};
 
 	const SORTS: Array<[string, string]> = [
@@ -497,8 +444,8 @@ export function renderDashboardMain(
 							? ratio(entry)
 							: key === "age"
 								? clock - entry.since
-								: RANK[entry.col];
-		const rows = shown.slice().sort((a, b) => {
+								: RANK[groupOf(entry)];
+		const rows = entries.slice().sort((a, b) => {
 			const x = value(a);
 			const y = value(b);
 			const order = typeof x === "number" && typeof y === "number" ? x - y : String(x).localeCompare(String(y), "ko");
@@ -514,9 +461,9 @@ export function renderDashboardMain(
 		const body = rows
 			.map(
 				(entry) =>
-					`<tr data-row="${esc(entry.id)}" data-state="${esc(stateKeyOf(entry))}"${isSel(entry.id) ? ' class="is-selected"' : ""}><td><span class="badges">${badgesOf(
-						entry,
-					)}</span></td><td class="list-title">${unreadDot(entry.id)}<a ${linkOf(entry)}${isSel(entry.id) ? ' aria-current="true"' : ""}>${esc(
+					`<tr data-row="${esc(entry.id)}" data-state="${esc(stateKeyOf(entry))}" class="is-${groupOf(entry)}${
+						isSel(entry.id) ? " is-selected" : ""
+					}${hitOf(entry) ? "" : " is-dim"}"><td>${markOf(entry)}${wordOf(entry)}</td><td class="list-title">${unreadDot(entry.id)}<a ${linkOf(entry)}${isSel(entry.id) ? ' aria-current="true"' : ""}>${esc(
 						entry.title,
 					)}</a></td><td>${esc(entry.machine)}</td><td class="mono">${esc(entry.taskId || "-")}</td><td class="num">${
 						entry.task === undefined ? "-" : esc(`${entry.task.acChecked ?? "-"}/${entry.task.acTotal}`)
@@ -525,9 +472,8 @@ export function renderDashboardMain(
 			.join("");
 		return `${head("에이전트 목록", rows.length, staleHead)}${banners.join("")}${
 			rows.length === 0
-				? nothing ||
-					'<div class="empty-box"><p class="note">보여 줄 에이전트나 TASK가 없어요.</p><p class="note-sub">새로운 작업이 시작되면 목록에 표시됩니다.</p></div>'
-				: `<table class="list"><thead><tr>${heads}</tr></thead><tbody>${body}</tbody></table>`
+				? '<div class="empty-box"><p class="note">보여 줄 에이전트나 TASK가 없어요.</p><p class="note-sub">새로운 작업이 시작되면 목록에 표시됩니다.</p></div>'
+				: `${hits === 0 ? nothing : ""}${groupSum}<table class="list"><thead><tr>${heads}</tr></thead><tbody>${body}</tbody></table>`
 		}`;
 	};
 
@@ -1399,11 +1345,8 @@ export function renderDashboardMain(
 	/** Only alerts whose gate is open right now warn; closed-gate records are a grey count. */
 	const openAlerts = s.alerts.ok ? s.alerts.items.filter((alert) => alert.gateState === "open").length : 0;
 	const NAV: Record<string, [number, boolean]> = {
-		// Entries in the 진행 중 column, like the turns item; an entry in 확인 필요 lights the warning.
-		inbox: [
-			entries.filter((entry) => entry.col === "working").length,
-			!s.tasks.ok || entries.some((entry) => entry.col === "attention"),
-		],
+		// Entries in 진행 중, like the turns item; an entry in 내 차례 lights the warning.
+		inbox: [entries.filter((entry) => entry.col === "working").length, !s.tasks.ok || attention.length > 0],
 		// Threads in the 진행 중 column, the same number the column shows; a thread in 확인 필요 or a troubled job
 		// lights the warning. Running jobs are counted in the view's head, not here.
 		turns: [

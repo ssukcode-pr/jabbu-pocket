@@ -92,8 +92,42 @@ describe("inbound uncertain migration", () => {
 			}>
 		).map((row) => row.name);
 
-	test("SCHEMA_VERSION is 10", () => {
-		expect(SCHEMA_VERSION).toBe(10);
+	test("SCHEMA_VERSION is 11", () => {
+		expect(SCHEMA_VERSION).toBe(11);
+	});
+
+	test("a version-10 inbound table (no 'sending') is rebuilt: every column kept, uncertain rows too, sending accepted", () => {
+		open().close();
+		const old = new Database(path);
+		old.run("PRAGMA foreign_keys = OFF");
+		const table = old.query("SELECT sql FROM sqlite_master WHERE name = 'inbound'").get();
+		const ddl = table !== null && typeof table === "object" && "sql" in table ? String(table.sql) : "";
+		expect(ddl).toContain("'sending'");
+		old.run("ALTER TABLE inbound RENAME TO inbound_new");
+		for (const name of INDEXES) old.run(`DROP INDEX IF EXISTS ${name}`);
+		old.run(ddl.replace("'pending','sending',", "'pending',"));
+		old.run("DROP TABLE inbound_new");
+		old.run("CREATE INDEX inbound_state ON inbound(state)");
+		old.run("INSERT INTO origins (origin_key, epoch, session_dir, updated_at) VALUES ('o1', 1, '/s/o1', 1)");
+		old.run(
+			"INSERT INTO inbound (inbound_id, platform_message_id, origin_key, epoch, text_ref, state, created_at, entry_cursor, thread_ref, uncertain_reason, uncertain_at, injected) VALUES (4, 'm4', 'o1', 1, 'r4', 'uncertain', 5, 'c4', 't4', 'steer_threw', 6, 1), (5, 'm5', 'o1', 1, 'r5', 'pending', 7, NULL, 't5', NULL, NULL, 0)",
+		);
+		expect(() => old.run("UPDATE inbound SET state = 'sending' WHERE inbound_id = 5")).toThrow();
+		old.run("PRAGMA user_version = 10");
+		old.close();
+
+		const store = open();
+		const parked = store.getInbound("m4");
+		expect(parked).toMatchObject({ state: "uncertain", uncertainReason: "steer_threw", uncertainAt: 6 });
+		expect(parked).toMatchObject({ entryCursor: "c4", threadRef: "t4", injected: true });
+		expect(store.markSending("m5", "c5")).toMatchObject({ state: "sending", entryCursor: "c5" });
+		store.close();
+
+		const db = new Database(path, { readonly: true });
+		expect(indexNames(db).sort()).toEqual([...INDEXES].sort());
+		expect(db.query("SELECT name FROM sqlite_master WHERE name = 'inbound_old'").all()).toEqual([]);
+		db.close();
+		expect(userVersion(path)).toBe(11);
 	});
 
 	test("a pre-uncertain inbound table is rebuilt: rows, inbound_id, all 7 indexes kept, uncertain accepted", () => {

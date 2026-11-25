@@ -108,6 +108,11 @@ const column = (html: string, id: string): string => {
 	return html.slice(start, html.indexOf("</section>", start));
 };
 const rowIds = (html: string): string[] => [...html.matchAll(/data-row="([^"]+)"/g)].map((match) => match[1] ?? "");
+/** The rows a search leaves lit (the others carry `is-dim`). */
+const litIds = (html: string): string[] =>
+	[...html.matchAll(/<a class="card trow (?![^"]*is-dim)[^"]*"[^>]*data-row="([^"]+)"/g)].map(
+		(match) => match[1] ?? "",
+	);
 const titleOf = (page: string): string => /<title>([^<]*)<\/title>/.exec(page)?.[1] ?? "";
 const faviconOf = (page: string): string => /<link rel="icon" id="favicon" href="([^"]+)">/.exec(page)?.[1] ?? "";
 
@@ -127,7 +132,7 @@ describe("inbox next line", () => {
 
 	test("AC-2: a search that matches another item keeps the same next line", () => {
 		const searched = renderDashboardMain(AC1, AC1_BOARD, NOW, { q: "pane w2:b10" });
-		expect(rowIds(column(searched, "attention"))).toEqual(["w2:b10"]);
+		expect(litIds(column(searched, "mine"))).toEqual(["w2:b10"]);
 		expect(nextUp(searched)).toBe(nextUp(renderDashboardMain(AC1, AC1_BOARD, NOW)));
 		expect(nextUp(searched)).toContain('href="?task=T-20261104-60"');
 	});
@@ -172,7 +177,7 @@ describe("inbox number keys", () => {
 	});
 
 	test("AC-4: when the search hides item 1 the numbers on screen start again at 1", () => {
-		const attention = column(renderDashboardMain(AC1, AC1_BOARD, NOW, { q: "pane w2" }), "attention");
+		const attention = column(renderDashboardMain(AC1, AC1_BOARD, NOW, { q: "pane w2" }), "mine");
 		expect([...attention.matchAll(/data-row="([^"]+)" data-order="(\d)"/g)].map((m) => `${m[2]}:${m[1]}`)).toEqual([
 			"1:w2:b30",
 			"2:w2:b10",
@@ -249,7 +254,7 @@ describe("inbox next line, 7·8절 (AC-9)", () => {
 		expect(replyKeyTarget({ key: "1", view: "inbox" }, reply)).toBeNull();
 	});
 
-	test("a done pane goes to 완료·대기 with or without a TASK; only the blocked pane is under 확인 필요", () => {
+	test("a done pane with no TASK is 확인함, a working TASK's done pane waits for the sweep; only the blocked pane is 내 차례", () => {
 		const snapshot = snapshotOf([task("T-20261104-70", {})]);
 		const board = boardOf([
 			card("w2:answered", "done", "done", { since: NOW - 90 * 60_000 }),
@@ -257,10 +262,11 @@ describe("inbox next line, 7·8절 (AC-9)", () => {
 			card("w2:tasked", "done", "done", { taskId: "T-20261104-70" }),
 		]);
 		const html = renderDashboardMain(snapshot, board, NOW);
-		expect(rowIds(column(html, "attention"))).toEqual(["w2:blocked"]);
-		expect(rowIds(column(html, "wait")).sort()).toEqual(["w2:answered", "w2:tasked"]);
+		expect(rowIds(column(html, "mine"))).toEqual(["w2:blocked"]);
+		expect(rowIds(column(html, "working"))).toEqual(["w2:tasked"]);
+		expect(rowIds(column(html, "done"))).toEqual(["w2:answered"]);
 		const only = renderDashboardMain(snapshotOf([]), boardOf([card("w2:answered", "done", "done")]), NOW);
-		expect(rowIds(column(only, "attention"))).toEqual([]);
+		expect(rowIds(column(only, "mine"))).toEqual([]);
 	});
 });
 
@@ -269,7 +275,7 @@ describe("cards whose since is unknown (0)", () => {
 	const entryOf = (c: BoardCard): InboxEntry => ({
 		id: c.key,
 		kind: "card",
-		col: "attention",
+		col: "mine",
 		since: c.since,
 		title: c.paneLabel,
 		machine: c.machineName,

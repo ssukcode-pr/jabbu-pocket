@@ -82,7 +82,11 @@ const SNAP = snapshotOf();
 
 const cardsOf = (html: string): string[] =>
 	[...html.matchAll(/<a class="card[ "][^>]*data-row="([^"]+)"/g)].map((m) => m[1] ?? "");
-const rowsOf = (html: string): string[] => [...html.matchAll(/<tr data-row="([^"]+)"/g)].map((m) => m[1] ?? "");
+/** Rows the filter and the search leave lit; the rest stay in place, dimmed (`is-dim`). */
+const litOf = (html: string): string[] =>
+	[...html.matchAll(/<a class="card (?![^"]*is-dim)[^"]*"[^>]*data-row="([^"]+)"/g)].map((m) => m[1] ?? "");
+const rowsOf = (html: string): string[] =>
+	[...html.matchAll(/<tr data-row="([^"]+)"[^>]*class="(?![^"]*is-dim)/g)].map((m) => m[1] ?? "");
 /** The server-drawn `#main` of a page, without the inline script. */
 const mainOf = (page: string): string => /<div id="main"[^>]*>([\s\S]*?)<div class="search">/.exec(page)?.[1] ?? "";
 /** The shared head row of the inbox: from the view head to the next line under it. */
@@ -93,7 +97,7 @@ describe("방치 herdr 패널 필터", () => {
 		const entry = (extra: Partial<InboxEntry>): InboxEntry => ({
 			id: "p",
 			kind: "card",
-			col: "wait",
+			col: "done",
 			since: NOW - 24 * HOUR,
 			title: "pane",
 			machine: "oci",
@@ -107,7 +111,7 @@ describe("방치 herdr 패널 필터", () => {
 			["since 0", entry({ since: 0 }), true],
 			["TASK 묶임", entry({ since: 0, taskId: "T-1", task: task("T-1") }), false],
 			["TASK 목록 실패라 taskId만", entry({ since: 0, taskId: "T-1" }), false],
-			["확인 필요 열", entry({ since: 0, col: "attention" }), false],
+			["내 차례 묶음", entry({ since: 0, col: "mine" }), false],
 			["진행 중 열", entry({ since: 0, col: "working" }), false],
 			["TASK 항목", entry({ since: 0, kind: "task", card: undefined }), false],
 		];
@@ -121,18 +125,21 @@ describe("방치 herdr 패널 필터", () => {
 		]);
 	});
 
-	test("AC-2: the 방치 chip sits in the shared head outside the column chips; on, only 방치 panes remain with an off button", () => {
+	test("AC-2: the 방치 chip sits in the shared head outside the group chips; on, only 방치 panes stay lit with an off button", () => {
 		const offHtml = renderDashboardMain(SNAP, MIXED, NOW);
 		const chipOff = '<button type="button" class="chip" data-stale aria-pressed="false">방치 <b>2</b></button>';
 		expect(headOf(offHtml)).toContain(chipOff);
-		expect(offHtml.indexOf(chipOff)).toBeLessThan(offHtml.indexOf('<nav class="col-chips"'));
-		const colChips = /<nav class="col-chips"[^>]*>([\s\S]*?)<\/nav>/.exec(offHtml)?.[1] ?? "";
-		expect(colChips).not.toContain("data-stale");
+		expect(offHtml.indexOf(chipOff)).toBeLessThan(offHtml.indexOf('<p class="badges group-sum"'));
+		const groupChips = /<p class="badges group-sum">([\s\S]*?)<\/p>/.exec(offHtml)?.[1] ?? "";
+		expect(groupChips).not.toContain("data-stale");
+		// Every pane is drawn; the 방치 ones are dimmed in 확인함 while the filter is off.
 		expect(cardsOf(offHtml).sort()).toEqual(["n1", "n2", "n3", "s1", "s2"]);
+		expect(litOf(offHtml).sort()).toEqual(["n1", "n2", "n3"]);
 		expect(offHtml).not.toContain("방치 필터 끄기");
 
 		const onHtml = renderDashboardMain(SNAP, MIXED, NOW, { stale: true });
-		expect(cardsOf(onHtml).sort()).toEqual(["s1", "s2"]);
+		expect(cardsOf(onHtml).length).toBe(5);
+		expect(litOf(onHtml).sort()).toEqual(["s1", "s2"]);
 		expect(headOf(onHtml)).toContain(
 			'<button type="button" class="chip" data-stale aria-pressed="true">방치 <b>2</b></button><button type="button" class="button is-ghost is-sm" data-stale-off>방치 필터 끄기</button>',
 		);
@@ -145,17 +152,17 @@ describe("방치 herdr 패널 필터", () => {
 			expect([view, html.includes("방치된 패널이 없어요"), html.includes('aria-pressed="true">방치 <b>0</b>')]).toEqual(
 				[view, true, true],
 			);
-			expect(cardsOf(html).concat(rowsOf(html))).toEqual([]);
+			expect(litOf(html).concat(rowsOf(html))).toEqual([]);
 		}
 	});
 
 	test("AC-4: the filter and the search both apply, the chip keeps the count before the search, and the list filters the same", () => {
 		const one = renderDashboardMain(SNAP, MIXED, NOW, { stale: true, q: "pane s1" });
-		expect(cardsOf(one)).toEqual(["s1"]);
+		expect(litOf(one)).toEqual(["s1"]);
 		expect(one).toContain('aria-pressed="true">방치 <b>2</b>');
 
 		const none = renderDashboardMain(SNAP, MIXED, NOW, { stale: true, q: "pane n1" });
-		expect(cardsOf(none)).toEqual([]);
+		expect(litOf(none)).toEqual([]);
 		expect(none).toContain("검색어와 방치 필터를 모두 만족하는 항목이 없어요");
 		expect(none).not.toContain("와 맞는 항목이 없어요");
 		expect(none).toContain('aria-pressed="true">방치 <b>2</b>');
@@ -176,9 +183,9 @@ describe("방치 herdr 패널 필터", () => {
 			const start = html.indexOf(`data-row="${id}"`);
 			return html.slice(start, html.indexOf("</a>", start));
 		};
-		expect(cardHtml("s1")).toContain('<span class="badge ">방치</span>');
+		expect(cardHtml("s1")).toContain('<b class="tw">방치</b>');
 		expect(cardHtml("s1")).toContain('<span class="card-time">-</span>');
-		expect(cardHtml("s2")).toContain('<span class="badge ">방치</span>');
+		expect(cardHtml("s2")).toContain('<b class="tw">방치</b>');
 		expect(cardHtml("s2")).toContain('<span class="card-time">1일 전</span>');
 		for (const id of ["n1", "n2", "n3"]) expect([id, cardHtml(id).includes(">방치<")]).toEqual([id, false]);
 	});
@@ -194,7 +201,7 @@ describe("방치 herdr 패널 필터", () => {
 		expect(clientRender(SNAP, MIXED, NOW, { stale: true })).toBe(html);
 
 		const main = mainOf(page);
-		expect(cardsOf(main).sort()).toEqual(["s1", "s2"]);
+		expect(litOf(main).sort()).toEqual(["s1", "s2"]);
 		expect(main).toContain('aria-pressed="true">방치 <b>2</b>');
 		expect(cardsOf(mainOf(renderDashboardPage(SNAP, { board: MIXED }))).length).toBe(5);
 		// A view that has no 방치 filter drops it.

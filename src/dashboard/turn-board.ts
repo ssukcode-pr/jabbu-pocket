@@ -19,8 +19,8 @@ const THREAD_RECENT = 20;
 const AUTO_FOLLOWUP_PREFIX = "[자동 후속";
 const ERROR_CHARS = 200;
 
-const TURN_COLUMNS = `inbound_id, platform_message_id, origin_key, text_ref, thread_ref, state, created_at,
-	dispatched_at, last_event_at`;
+const TURN_COLUMNS = `inbound_id, platform_message_id, origin_key, text_ref, thread_ref, created_at, dispatched_at,
+	last_event_at, CASE state WHEN 'sending' THEN 'dispatched' ELSE state END AS state`;
 
 export interface TurnInfo {
 	inboundId: number;
@@ -163,7 +163,8 @@ function readInstallTurns(
 ): { items: TurnInfo[]; threads: ThreadInfo[] } {
 	const { now, iso, draining, frozen, activeJobs, sessionModel, install } = opts;
 	const isPeer = install !== undefined;
-	const openStates = isPeer ? "('pending','dispatched')" : "('pending','dispatched','uncertain')";
+	// `sending` (the write-ahead before a prompt or steer) counts as running: TURN_COLUMNS reads it as `dispatched`.
+	const openStates = isPeer ? "('pending','sending','dispatched')" : "('pending','sending','dispatched','uncertain')";
 	const open = rows<TurnSql>(
 		handle,
 		`SELECT ${TURN_COLUMNS} FROM inbound WHERE state IN ${openStates} ORDER BY created_at, inbound_id LIMIT ?`,

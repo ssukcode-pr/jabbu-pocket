@@ -1,6 +1,6 @@
 {
 	"name": "jabbu-pocket",
-	"version": "0.1.0",
+	"version": "0.1.1",
 	"private": true,
 	"license": "MIT",
 	"type": "module",
@@ -13,7 +13,7 @@
 	},
 	"scripts": {
 		"test": "scripts/heavy-run -- bun test --parallel=3",
-		"check": "biome check --error-on-warnings . && tsc --noEmit && bun src/dev/test-sleeps.ts && bun src/dev/check-loc.ts",
+		"check": "biome check --error-on-warnings . && tsc --noEmit && bun src/dev/test-sleeps.ts && bun src/dev/check-loc.ts && bun scripts/tla-covered.ts",
 		"knip": "knip",
 		"smoke-omp": "JABBU_E2E_OMP=1 bun test test/omp-smoke.e2e.test.ts test/omp-rpc.contract.test.ts",
 		"test:omp-mock": "JABBU_E2E_OMP_MOCK=1 bun test test/omp-mock.e2e.test.ts"

@@ -19,6 +19,7 @@ import {
 } from "../src/dashboard/inbox";
 import { renderDashboardMain } from "../src/dashboard/main-view";
 import type { DashboardSnapshot, TaskInfo } from "../src/dashboard/snapshot";
+import type { turnOf } from "../src/dashboard/turn";
 
 const NOW = Date.parse("2026-11-04T01:00:00Z");
 const DAY = 86_400_000;
@@ -160,9 +161,9 @@ describe("AC-1: entrySig and unreadIds", () => {
 		expect(unreadAfter(before, loneTask({ error: "문서 판정 실패" }))).toBe(true);
 		expect(unreadAfter(before, loneTask({ herdr: { ok: false, error: "ssh down" } }))).toBe(true);
 		expect(unreadAfter(before, loneTask({ herdr: { ok: true, status: "gone" } }))).toBe(true);
-		// The same TASK seen while the board is live (no pane for it) sits under 확인 필요: a column change.
+		// The same TASK seen while the board is live (no pane for it) sits under 내 차례: a group change.
 		const live = entryOf(snapshotOf([task("T-20261104-70")]), boardOf([]), "T-20261104-70");
-		expect(live.col).toBe("attention");
+		expect(live.col).toBe("mine");
 		expect(before.col).toBe("working");
 		expect(unreadAfter(before, live)).toBe(true);
 	});
@@ -338,28 +339,29 @@ describe("AC-3: the unread dot and the column's unread line", () => {
 		return html.slice(html.lastIndexOf("<a ", at), html.indexOf("</a>", at));
 	};
 
-	test("only the unread cards carry the dot; each column counts its own", () => {
+	test("only the unread rows carry the dot; each group counts its own; an unread done pane is 읽을 것", () => {
 		const html = renderDashboardMain(s, BOARD, NOW, { unread: ["w3:x", "T-20261104-74", "w3:d"] });
 		expect(cardHtml(html, "w3:x")).toContain('class="unread-dot"');
-		expect(cardHtml(html, "w3:x")).toContain(" is-unread");
 		expect(cardHtml(html, "w3:d")).toContain('class="unread-dot"');
 		for (const key of ["w3:y", "w3:z"]) expect(cardHtml(html, key)).not.toContain("unread-dot");
 		expect(html.split('class="unread-dot"').length - 1).toBe(3);
-		expect(column(html, "attention")).toContain(
-			'</h2><div class="col-unread"><span>안 읽음 <b>2</b></span><button type="button" class="button is-ghost is-sm" data-mark-read="attention">모두 읽음</button></div>',
+		expect(column(html, "mine")).toContain(
+			'</h2><div class="col-unread"><span>안 읽음 <b>2</b></span><button type="button" class="button is-ghost is-sm" data-mark-read="mine">모두 읽음</button></div>',
 		);
-		expect(column(html, "wait")).toContain("안 읽음 <b>1</b>");
+		expect(column(html, "read")).toContain("안 읽음 <b>1</b>");
+		expect(column(html, "read")).toContain('data-card="w3:d"');
 		expect(column(html, "working")).not.toContain("col-unread");
 		// The head itself is the one the inbox tests pin.
-		expect(column(html, "attention")).toMatch(
-			/<h2 class="col-head"><span>확인 필요<\/span><span class="count-chip">3<\/span><\/h2>/,
+		expect(column(html, "mine")).toMatch(
+			/<h2 class="col-head"><span>내 차례<\/span><span class="count-chip">3<\/span><\/h2>/,
 		);
 	});
 
-	test("the count follows the search: hidden cards are not counted", () => {
+	test("a search dims rows but keeps them, their dots and their unread count", () => {
 		const html = renderDashboardMain(s, BOARD, NOW, { q: "w3:y", unread: ["w3:x", "T-20261104-74"] });
-		expect(column(html, "attention")).not.toContain("col-unread");
-		expect(html).not.toContain("unread-dot");
+		expect(column(html, "mine")).toContain("안 읽음 <b>2</b>");
+		expect(cardHtml(html, "w3:x")).toMatch(/^<a class="card trow is-mine is-dim"/);
+		expect(cardHtml(html, "w3:y")).not.toContain("is-dim");
 	});
 
 	test("the list view puts the dot before the title", () => {
@@ -368,16 +370,22 @@ describe("AC-3: the unread dot and the column's unread line", () => {
 		expect(html.split('class="unread-dot"').length - 1).toBe(1);
 	});
 
-	test("order, numbers, the next line and the tab title do not depend on read marks", () => {
+	test("내 차례 order and numbers, the next line and the tab title do not depend on read marks", () => {
 		const all = inboxEntries(s, BOARD).map((entry) => entry.id);
 		const plain = renderDashboardMain(s, BOARD, NOW);
 		const marked = renderDashboardMain(s, BOARD, NOW, { unread: all });
 		const strip = (html: string): string =>
-			html
-				.replace(/<span class="unread-dot"[^>]*><\/span>/g, "")
-				.replace(/<div class="col-unread">.*?<\/div>/g, "")
-				.replace(/ is-unread/g, "");
-		expect(strip(marked)).toBe(plain);
+			html.replace(/<span class="unread-dot"[^>]*><\/span>/g, "").replace(/<div class="col-unread">.*?<\/div>/g, "");
+		expect(strip(column(marked, "mine"))).toBe(column(plain, "mine"));
+		const next = (html: string): string =>
+			html.slice(
+				html.indexOf('<div class="next-line">'),
+				html.indexOf("</div>", html.indexOf('<div class="next-line">')),
+			);
+		expect(next(marked)).toBe(next(plain));
+		// Only a done pane moves: 확인함 read, 읽을 것 unread.
+		expect(column(plain, "done")).toContain('data-card="w3:d"');
+		expect(column(marked, "read")).toContain('data-card="w3:d"');
 		expect(inboxAttention(s, BOARD).map((entry) => entry.id)).toEqual(["T-20261104-74", "w3:x", "w3:y"]);
 		expect(tabSignal(s, BOARD, false).title).toBe("(3) 확인 필요 · jabbu 현황판");
 	});
@@ -414,5 +422,34 @@ describe("AC-4: the page ships the read-mark functions and constants", () => {
 		expect(shipped.seedStore(store, s, undefined, NOW)).toBe(true);
 		const fresh = snapshotOf([task("T-20261104-77"), task("T-20261104-78")]);
 		expect(shipped.unreadIds(shipped.inboxEntries(fresh, undefined), store)).toEqual(["T-20261104-78"]);
+	});
+
+	test("turnOf ships beside inboxEntries: a client redraw groups and draws the rows like the server (no ReferenceError)", () => {
+		const run = new Function(`${SCRIPT}\nreturn { turnOf, inboxEntries, renderDashboardMain };`) as () => {
+			turnOf: typeof turnOf;
+			inboxEntries: typeof inboxEntries;
+			renderDashboardMain: typeof renderDashboardMain;
+		};
+		const shipped = run();
+		expect(SCRIPT).toContain("const turnOf = function turnOf(");
+		const s = snapshotOf([
+			task("T-20261104-80", { status: "blocked", decision: { question: "어느 쪽?" } }),
+			task("T-20261104-81", { status: "review", land: "active", repo: "demo", workerModel: "glm/x:high" }),
+			task("T-20261104-82", { judge: "diff" }),
+		]);
+		const board = boardOf([card("w3:d", "done", "done")]);
+		expect(shipped.inboxEntries(s, board).map((entry) => [entry.id, entry.col])).toEqual([
+			["w3:d", "done"],
+			["T-20261104-80", "mine"],
+			["T-20261104-81", "working"],
+			["T-20261104-82", "mine"],
+		]);
+		const [done] = shipped.inboxEntries(s, board);
+		if (done === undefined) throw new Error("no entry");
+		expect(shipped.turnOf(done, true).group).toBe("read");
+		for (const view of ["inbox", "list"]) {
+			const ui = { view, unread: ["w3:d", "T-20261104-80"] };
+			expect(shipped.renderDashboardMain(s, board, NOW, ui)).toBe(renderDashboardMain(s, board, NOW, ui));
+		}
 	});
 });

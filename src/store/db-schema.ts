@@ -181,8 +181,8 @@ CREATE TABLE IF NOT EXISTS board_reads (
 export const LANE_BOARD_TEXT_MAX = 2_000;
 
 /**
- * The inbound ledger. `uncertain` parks an input that may already have reached the omp child (`uncertain_reason` says
- * why, `uncertain_at` when) until the owner closes or retries it. A ledger without it is rebuilt by `migrateInbound`.
+ * The inbound ledger. `sending` is written right before a prompt or steer; `uncertain` parks an input that may already
+ * have reached the omp child (`uncertain_reason`, `uncertain_at`). A ledger without either is rebuilt (`db-sending.ts`).
  * `injected` is 1 for a row `jabbu-pocket inject` put in (`OwnerIngest.injected`): it may not answer an ask card.
  */
 export const INBOUND_DDL = `CREATE TABLE IF NOT EXISTS inbound (
@@ -192,7 +192,7 @@ export const INBOUND_DDL = `CREATE TABLE IF NOT EXISTS inbound (
 	epoch INTEGER NOT NULL,
 	text_ref TEXT NOT NULL,
 	state TEXT NOT NULL DEFAULT 'pending'
-		CHECK (state IN ('pending','dispatched','answered','failed_notified','discarded','uncertain')),
+		CHECK (state IN ('pending','sending','dispatched','answered','failed_notified','discarded','uncertain')),
 	created_at INTEGER NOT NULL,
 	dispatched_at INTEGER,
 	op_ref TEXT,

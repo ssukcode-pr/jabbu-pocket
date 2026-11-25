@@ -168,17 +168,16 @@ const nextUp = (html: string): string => {
 };
 
 describe("inbox question: pending ask", () => {
-	test("AC-1: a pending ask shows 묻는 말 and its three choices, escaped, in card-options", async () => {
+	test("AC-1: a pending ask is the row's first line under 질문; its three choices, escaped, are in the detail panel", async () => {
 		const path = pendingAsk("ask.jsonl");
 		const state = stateOf([card("p1", "blocked")]);
 		const fake = runner([{ name: "a1", status: "blocked", pane: "p1", session: pathSession(path) }]);
 		const snapshot = await buildSnapshot(deps(fake.run, state));
 		const html = renderDashboardMain(snapshot, viewOf(state), NOW);
 		const one = cardHtml(html, "p1");
-		expect(one).toContain(`<p class="card-sum">묻는 말: ${QUESTION}</p>`);
-		const options = /<p class="card-options">(.*?)<\/p>/.exec(one)?.[1] ?? "";
-		expect(options).toBe("A안 &lt;b&gt;굵게&lt;/b&gt; / B안 / C안");
-		expect(one).not.toContain("<b>굵게");
+		expect(one).toContain(`${QUESTION}</span><span class="t2">`);
+		expect(one).toContain('<b class="tw">질문</b>');
+		expect(one).not.toContain("굵게");
 		expect(nextUp(html)).toContain(QUESTION);
 		// The detail panel lists the question and every choice.
 		const detail = renderDetailHead("p1", { ...card("p1", "blocked"), ...snapshotSay(snapshot, "p1") }, undefined, NOW);
@@ -233,7 +232,7 @@ describe("inbox question: pending ask", () => {
 });
 
 describe("inbox question: last answer", () => {
-	test("AC-2: a done pane with no TASK shows the first sentence of the last answer on its 완료·대기 card", async () => {
+	test("AC-2: a done pane with no TASK shows the first sentence of the last answer as its 확인함 row's reason", async () => {
 		const path = session("done.jsonl", [
 			user("질문"),
 			assistant([{ type: "text", text: "옛 답입니다." }], { stopReason: "stop" }),
@@ -252,7 +251,7 @@ describe("inbox question: last answer", () => {
 		const fake = runner([{ name: "a2", status: "done", pane: "p2", session: pathSession(path) }]);
 		const snapshot = await buildSnapshot(deps(fake.run, state));
 		const html = renderDashboardMain(snapshot, viewOf(state), NOW);
-		expect(cardHtml(html, "p2")).toContain('<p class="card-sum">배포를 마쳤습니다.</p>');
+		expect(cardHtml(html, "p2")).toContain('<b class="tw">완료</b><span>배포를 마쳤습니다.</span>');
 		expect(nextUp(html)).not.toContain("배포를 마쳤습니다.");
 		expect(html).not.toContain("로그는 깨끗합니다");
 	});
@@ -335,8 +334,10 @@ describe("inbox question: isolation and other reasons", () => {
 		]);
 		const snapshot = await buildSnapshot(deps(fake.run, state));
 		const html = renderDashboardMain(snapshot, viewOf(state), NOW);
-		expect(cardHtml(html, "p1")).toContain('<p class="card-sum">도구 실행 승인 대기: bash</p>');
-		expect(cardHtml(html, "p3")).toContain('<p class="card-sum">프로바이더 오류: 429 rate limited by provider</p>');
+		expect(cardHtml(html, "p1")).toContain('<b class="tw">승인 대기</b><span>도구 실행 승인 대기: bash</span>');
+		expect(cardHtml(html, "p3")).toContain(
+			'<b class="tw">막힘</b><span>프로바이더 오류: 429 rate limited by provider</span>',
+		);
 		expect(html).not.toContain("retry later");
 	});
 });

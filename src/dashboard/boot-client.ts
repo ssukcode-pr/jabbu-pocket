@@ -290,7 +290,7 @@ export const BOOT_CLIENT = `function boot() {
 				else pillUntil.delete(id);
 			}
 			const col = state.split(":")[0];
-			if (hadPrev && (prev === undefined ? col === "attention" : prev.split(":")[0] !== col)) {
+			if (hadPrev && (prev === undefined ? col === "attention" || col === "mine" : prev.split(":")[0] !== col)) {
 				ringUntil.set(id, now + 1600);
 			}
 			prevStates.set(id, state);
@@ -477,8 +477,8 @@ export const BOOT_CLIENT = `function boot() {
 		const row = active && main.contains(active) && active.closest("[data-row]");
 		const focusRow = row ? row.getAttribute("data-row") : null;
 		const sorter = active && main.contains(active) ? active.getAttribute("data-sort") : null;
-		const folded = document.getElementById("closed");
-		const closedOpen = folded ? folded.open : false;
+		// Folds with an id (최근 닫힘, 더 보기) stay open across the redraw.
+		const folds = Array.from(main.querySelectorAll("details[open][id]"), (fold) => fold.id);
 		main.innerHTML = html;
 		drawnMain = html;
 		markChanges();
@@ -488,8 +488,7 @@ export const BOOT_CLIENT = `function boot() {
 		const next = document.getElementById("view");
 		if (next) next.scrollTop = scroll;
 		if (top) window.scrollTo(0, 0);
-		const again = document.getElementById("closed");
-		if (again && closedOpen) again.open = true;
+		for (const id of folds) document.getElementById(id)?.setAttribute("open", "");
 		if (focusRow !== null) {
 			const target = rowOf(focusRow);
 			if (target) target.focus({ preventScroll: true });

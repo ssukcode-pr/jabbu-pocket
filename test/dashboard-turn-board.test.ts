@@ -189,6 +189,16 @@ describe("turn board snapshot", () => {
 		]);
 	});
 
+	test("a sending row (mid prompt or steer) shows as a running turn: dispatched, its thread working", async () => {
+		const chat = "discord/ch/300000000000000001/t/100000000000000001";
+		seed([{ origin: chat, text: "보내는 중인 요청", state: "sending", createdAt: NOW - MINUTE }]);
+		const snapshot = await buildSnapshot(deps());
+		if (!snapshot.turns.ok) throw new Error(`turns section failed: ${snapshot.turns.error}`);
+		expect(snapshot.turns.items.map((turn) => [turn.state, turn.waitReason])).toEqual([["dispatched", null]]);
+		const thread = snapshot.turns.threads.find((item) => item.originKey === chat);
+		expect([thread?.column, thread?.openCount, thread?.latest.state]).toEqual(["working", 1, "dispatched"]);
+	});
+
 	test("an uncertain row keeps its thread open and in attention, shows as 전달 불확실 and counts on a lane", async () => {
 		const LANE = "jabbu/work/fix-login";
 		const chat = "discord/ch/300000000000000001/t/100000000000000001";

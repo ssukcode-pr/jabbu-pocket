@@ -12,7 +12,7 @@
 [![Workers](https://img.shields.io/badge/workers-herdr-bc8cff?style=flat-square&labelColor=black)](https://github.com/herdrdev/herdr)
 [![Discord](https://img.shields.io/badge/Discord-Gateway-5865F2?style=flat-square&labelColor=black&logo=discord)](https://discord.com/developers/docs/events/gateway)
 
-[빠른 시작](#빠른-시작) · [핵심 기능](#핵심-기능) · [작동 방식](#작동-방식) · [통제권](#통제권은-사용자에게-있습니다) · [명령](#명령-한눈에) · [사용 설명서](docs/guide.md)
+[빠른 시작](#빠른-시작) · [핵심 기능](#핵심-기능) · [작동 방식](#작동-방식) · [통제권](#통제권은-사용자에게-있습니다) · [명령](#명령-한눈에) · [사용 설명서](docs/guide.md) · [설계 코어](docs/architecture.md)
 
 </div>
 

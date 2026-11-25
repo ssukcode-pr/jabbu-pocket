@@ -25,7 +25,6 @@ import {
 	faviconHref,
 	inboxAttention,
 	inboxEntries,
-	inboxNextReason,
 	isStale,
 	markSeen,
 	orderKeyTarget,
@@ -70,6 +69,7 @@ import {
 } from "./text";
 import { TRACE_CLIENT } from "./trace-client";
 import { flowDoing, renderFlow, renderTrace } from "./trace-view";
+import { turnOf } from "./turn";
 import { resetIn, trendHtml, usageLevel } from "./usage-forecast";
 
 /**
@@ -96,7 +96,7 @@ const isStale = ${isStale.toString()};
 const attentionGroup = ${attentionGroup.toString()};
 const byAttention = ${byAttention.toString()};
 const inboxAttention = ${inboxAttention.toString()};
-const inboxNextReason = ${inboxNextReason.toString()};
+const turnOf = ${turnOf.toString()};
 const faviconHref = ${faviconHref.toString()};
 const tabSignal = ${tabSignal.toString()};
 const orderKeyTarget = ${orderKeyTarget.toString()};

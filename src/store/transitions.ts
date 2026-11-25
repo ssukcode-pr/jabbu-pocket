@@ -3,10 +3,11 @@ export const BACKOFF_CAP_MS = 5 * 60_000;
 export const MAX_DEFINITIVE_FAILURES = 5;
 export const FRESHNESS_MS = 24 * 60 * 60_000;
 
-export type InboundState = "pending" | "dispatched" | "answered" | "failed_notified" | "discarded" | "uncertain";
-
+type OpenInboundState = "pending" | "sending" | "dispatched" | "uncertain";
+export type InboundState = OpenInboundState | "answered" | "failed_notified" | "discarded";
 /** Why a row was parked as `uncertain`: the input may already have reached the omp child, so it is never replayed. */
-export type UncertainReason = "steer_threw" | "turn_ended_after_steer" | "dispatch_record_failed";
+type SteerReason = "steer_threw" | "turn_ended_after_steer";
+export type UncertainReason = SteerReason | "dispatch_record_failed" | "prompt_timeout" | "send_interrupted";
 export type DeliveryState = "pending" | "inflight" | "confirmed" | "failed_ambiguous" | "expired";
 
 export type StoreErrorCode = "invalid_transition" | "not_found" | "unknown_origin" | "invalid_argument";
@@ -21,12 +22,11 @@ export class StoreError extends Error {
 	}
 }
 
-/**
- * Inbound transitions. answered / failed_notified / discarded are terminal. `uncertain` leaves only by the owner:
- * back to pending (retry) or discarded (close); never straight to dispatched.
- */
+// Inbound transitions; answered / failed_notified / discarded are terminal. `uncertain` leaves only by the owner (retry:
+// pending, close: discarded). `sending` (write-ahead before a prompt or steer) ends dispatched, uncertain or pending.
 export const INBOUND_TRANSITIONS: Record<InboundState, readonly InboundState[]> = {
-	pending: ["dispatched", "discarded", "uncertain"],
+	pending: ["sending", "dispatched", "discarded", "uncertain"],
+	sending: ["dispatched", "uncertain", "pending"],
 	uncertain: ["pending", "discarded"],
 	dispatched: ["answered", "failed_notified", "discarded"],
 	answered: [],

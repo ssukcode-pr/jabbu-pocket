@@ -12,9 +12,10 @@ import {
 	readWrites,
 } from "../src/dashboard/edit-overlap";
 import { SCRIPT } from "../src/dashboard/html";
-import { inboxAttention, inboxNextReason } from "../src/dashboard/inbox";
+import { inboxAttention } from "../src/dashboard/inbox";
 import { renderDashboardMain } from "../src/dashboard/main-view";
 import type { DashboardSnapshot, TaskInfo, ThreadInfo } from "../src/dashboard/snapshot";
+import { turnOf } from "../src/dashboard/turn";
 
 const NOW = Date.parse("2026-11-25T03:00:00Z");
 const MIN = 60_000;
@@ -324,6 +325,9 @@ describe("display", () => {
 		const withTask = { ...snapshot, tasks: { ok: true as const, items: [task] } };
 		const [entry, ...rest] = inboxAttention(withTask);
 		expect(rest).toEqual([]);
-		expect(entry && inboxNextReason(entry, false)).toBe("입력 필요 · 파일 겹침 /r/a.ts ↔ 레인 x");
+		expect(entry && turnOf(entry).reason).toBe("입력 필요");
+		expect(renderDashboardMain(withTask, undefined, NOW)).toContain(
+			'<span class="next-why">입력 필요 · 파일 겹침 /r/a.ts ↔ 레인 x · local · task/T-1</span>',
+		);
 	});
 });

@@ -3,6 +3,7 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { TLC } from "../scripts/tla-check";
 
 type Step = {
 	uses?: string;
@@ -112,12 +113,12 @@ describe("ci.yml", () => {
 			for (const step of workflow.jobs[job].steps) expect(step.run ?? "").not.toContain("curl");
 	});
 
-	test("test-arm64 runs on the arm64 image and repeats the test job's steps; the required job names stay", () => {
+	test("test-arm64 runs on the arm64 image and repeats the test job's steps up to the TLA+ check; the required job names stay", () => {
 		expect(Object.keys(workflow.jobs)).toEqual(["test", "test-arm64", "e2e-omp-mock"]);
 		expect(workflow.jobs["test-arm64"]["runs-on"]).toBe("ubuntu-24.04-arm");
 		expect(workflow.jobs.test["runs-on"]).toBe("ubuntu-24.04");
 		expect(workflow.jobs["e2e-omp-mock"]["runs-on"]).toBe("ubuntu-24.04");
-		expect(workflow.jobs["test-arm64"].steps).toEqual(workflow.jobs.test.steps);
+		expect(workflow.jobs["test-arm64"].steps).toEqual(workflow.jobs.test.steps.slice(0, -3));
 		expect(workflow.jobs.test.steps.map((step) => step.run ?? step.uses)).toEqual([
 			expect.stringContaining("actions/checkout@"),
 			"./.github/actions/setup",
@@ -125,7 +126,24 @@ describe("ci.yml", () => {
 			"bun run check",
 			"bun run knip",
 			"bun test --parallel=3",
+			expect.stringContaining("actions/setup-java@"),
+			expect.stringContaining("actions/cache@"),
+			"bun scripts/tla-check.ts --strict",
 		]);
+	});
+
+	test("the test job installs temurin 21 and runs the mailbox TLA+ check strictly, caching only the pinned jar", () => {
+		const steps = workflow.jobs.test.steps;
+		const java = steps.find((step) => step.uses?.startsWith("actions/setup-java@"));
+		expect(java?.with).toEqual({ distribution: "temurin", "java-version": "21" });
+		const check = steps.findIndex((step) => step.run === "bun scripts/tla-check.ts --strict");
+		expect(check).toBeGreaterThan(steps.indexOf(java as Step));
+		const cache = steps[check - 1];
+		expect(cache?.uses).toContain("actions/cache@");
+		expect(cache?.with?.path).toBe(`~/.cache/jabbu-pocket/tla2tools-${TLC.tag}.jar`);
+		expect(cache?.with?.key).toBe(`tla2tools-${TLC.tag}-${TLC.sha256}`);
+		for (const job of ["test-arm64", "e2e-omp-mock"] as const)
+			expect(workflow.jobs[job].steps.some((step) => step.run?.includes("tla-check"))).toBe(false);
 	});
 
 	test("the e2e-omp-mock job never sets the expected-version input, so it keeps the fixture pin", () => {

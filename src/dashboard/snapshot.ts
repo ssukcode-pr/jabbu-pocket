@@ -62,6 +62,7 @@ import type { PeerInstall } from "./peers";
 import { previewLine } from "./preview-line";
 import { createSessionModelReader } from "./session-model";
 import { isStatusResponse, sharedFetch } from "./snapshot-fetch";
+import { type TaskTurnFields, taskTurnFields } from "./turn";
 import { buildTurnsSection, type PeerTurnError, rows, type ThreadInfo, type TurnInfo } from "./turn-board";
 import { readUsageLimits, type UsageLimitsInfo } from "./usage-limits";
 
@@ -119,7 +120,7 @@ export type { PeerTurnError, ThreadInfo, TurnInfo, TurnKind, TurnWaitReason } fr
 
 type HerdrState = { ok: true; status: HerdrAgentStatus } | { ok: false; error: string };
 
-export interface TaskInfo {
+export interface TaskInfo extends TaskTurnFields {
 	taskId: string;
 	title: string;
 	risk: TaskRisk;
@@ -1621,14 +1622,11 @@ export async function buildSnapshot(deps: SnapshotDeps): Promise<DashboardSnapsh
 				};
 				info.acceptance = j.acceptance.map((item) => ({ ...item, text: redact(item.text) }));
 				info.steps = j.steps.map((step) => ({ ...step, text: redact(step.text) }));
-			} else {
-				const failure = message(evaluation.error);
-				info.error = info.error === undefined ? failure : `${info.error} · ${failure}`;
-			}
+			} else info.error = [info.error ?? [], message(evaluation.error)].flat().join(" · ");
 			info.herdr = herdr.ok ? herdr : { ok: false, error: message(herdr.error) };
 			if (link !== undefined) info.link = link;
 			info.overlap = (await editOverlaps).overlaps?.hints[`task:${row.taskId}`];
-			return info;
+			return Object.assign(info, taskTurnFields(row, evaluation.ok ? evaluation.judgement : undefined));
 		};
 
 		const tasks = section(async () => {

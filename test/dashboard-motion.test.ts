@@ -74,38 +74,53 @@ describe("header number roll", () => {
 describe("event stack", () => {
 	const row = (id: string, col: string) => ({ id, kind: "card" as const, col, title: `제목 ${id}` });
 
-	test("AC-2: the first draw and the read marks' first visit give no card; later draws give new and moved cards", () => {
-		expect(freshCards(new Map(), [row("a", "working")], false).cards).toEqual([]);
+	test("AC-2: the first draw and the read marks' first visit give no card; later draws give rows that came into 내 차례", () => {
+		expect(freshCards(new Map(), [row("a", "mine")], false).cards).toEqual([]);
 		const prev = new Map([["a", "working"]]);
-		expect(freshCards(prev, [row("a", "working"), row("b", "wait")], true).cards).toEqual([]);
-		const got = freshCards(prev, [row("a", "attention"), row("b", "wait")], false);
-		expect(got.cards.map((card) => [card.id, card.why])).toEqual([
-			["a", "moved"],
-			["b", "new"],
-		]);
+		expect(freshCards(prev, [row("a", "mine"), row("b", "mine")], true).cards).toEqual([]);
+		const got = freshCards(prev, [row("a", "mine"), row("b", "mine"), row("c", "done")], false);
+		// A new row or a moved one alike, but only into 내 차례; a row new in 확인함 rings nothing.
+		expect(got.cards.map((card) => card.id)).toEqual(["a", "b"]);
 		expect([...got.next]).toEqual([
-			["a", "attention"],
-			["b", "wait"],
+			["a", "mine"],
+			["b", "mine"],
+			["c", "done"],
 		]);
-		expect(freshCards(got.next, [row("a", "attention"), row("b", "wait")], false).cards).toEqual([]);
+		expect(freshCards(got.next, [row("a", "mine"), row("b", "mine")], false).cards).toEqual([]);
 	});
 
-	test("AC-2: newest first, one card per id, six kept, three drawn", () => {
+	test("AC-5: a row staying in 내 차례 while its reason changes is one stack card; out and back in is two", () => {
+		const turnRow = (word: string, col: string) => ({ ...row("T-1", col), title: `질문 · ${word}` });
+		let memory = new Map([["other", "working"]]);
 		let list: StackCard[] = [];
-		for (let i = 0; i < 8; i++) {
-			list = pushStack(list, [{ ...row(`c${i}`, "wait"), why: "new" }], 1000 + i);
-		}
+		const draw = (col: string, word: string, at: number): void => {
+			const got = freshCards(memory, [row("other", "working"), turnRow(word, col)], false);
+			memory = got.next;
+			list = pushStack(list, got.cards, at);
+		};
+		draw("mine", "판정 막힘", 1);
+		draw("mine", "질문", 2);
+		draw("mine", "막힘", 3);
+		expect(list.map((card) => card.id)).toEqual(["T-1"]);
+		draw("working", "진행 중", 4);
+		draw("mine", "결정 대기", 5);
+		expect(list.map((card) => [card.id, card.at])).toEqual([
+			["T-1", 5],
+			["T-1", 1],
+		]);
+	});
+
+	test("AC-2: newest first, six kept, three drawn", () => {
+		let list: StackCard[] = [];
+		for (let i = 0; i < 8; i++) list = pushStack(list, [row(`c${i}`, "mine")], 1000 + i);
 		expect(list.map((card) => card.id)).toEqual(["c7", "c6", "c5", "c4", "c3", "c2"]);
-		list = pushStack(list, [{ ...row("c4", "attention"), why: "moved" }], 2000);
-		expect(list.map((card) => card.id).slice(0, 2)).toEqual(["c4", "c7"]);
-		expect(list.length).toBe(6);
 		const out = stackHtml(list);
 		expect(out.html.match(/class="es-card/g)?.length).toBe(3);
-		expect(out.say).toContain("상태 바뀜: 제목 c4 외 5건");
+		expect(out.say).toContain("내 차례: 제목 c7 외 5건");
 	});
 
 	test("AC-2: a card title is escaped and links to its detail", () => {
-		const out = stackHtml([{ id: "k/1", kind: "card", col: "attention", title: "<img src=x>", why: "new", at: 1 }]);
+		const out = stackHtml([{ id: "k/1", kind: "card", title: "<img src=x>", at: 1 }]);
 		expect(out.html).not.toContain("<img");
 		expect(out.html).toContain('href="?card=k%2F1"');
 		expect(out.html).toContain('data-card="k/1"');
@@ -114,8 +129,8 @@ describe("event stack", () => {
 
 	test("AC-2: the oldest card goes after 6 s untouched, one at a time; touch delays it", () => {
 		const list: StackCard[] = [
-			{ id: "new", kind: "card", col: "wait", title: "n", why: "new", at: 10_000 },
-			{ id: "old", kind: "card", col: "wait", title: "o", why: "new", at: 1_000 },
+			{ id: "new", kind: "card", title: "n", at: 10_000 },
+			{ id: "old", kind: "card", title: "o", at: 1_000 },
 		];
 		expect(expireStack(list, 6_999, 0, 6_000, false)).toBe(list);
 		expect(expireStack(list, 7_000, 0, 6_000, false).map((card) => card.id)).toEqual(["new"]);
@@ -123,7 +138,7 @@ describe("event stack", () => {
 	});
 
 	test("AC-3: with reduced motion the cards stay until they are closed", () => {
-		const list: StackCard[] = [{ id: "a", kind: "card", col: "wait", title: "a", why: "new", at: 0 }];
+		const list: StackCard[] = [{ id: "a", kind: "card", title: "a", at: 0 }];
 		expect(expireStack(list, 999_999, 0, 6_000, true)).toBe(list);
 	});
 

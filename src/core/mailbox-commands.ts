@@ -3,11 +3,11 @@ import { dirname, join } from "node:path";
 import { MONITOR_ORIGIN_PREFIX } from "../monitors/ledger";
 import { type OmpCompactResult, OmpDriverError } from "../omp/driver";
 import type { InboundRow } from "../store/db-rows";
-import type { UncertainReason } from "../store/transitions";
 /** Injected so tests use `FakeOmpDriver`; production builds an `RpcOmpDriver` for (origin, sessionDir). */
 import { chargeSessionWindow } from "./mailbox-cost";
 import { briefingReason, pickOption } from "./mailbox-helpers";
 import { failedNotice } from "./mailbox-notices";
+import { UNCERTAIN_REASON_TEXT } from "./mailbox-sending";
 import { MAX_LISTED, type MailboxDeps, type MailboxHost, minutes, preview } from "./mailbox-types";
 import { platformOfThreadRef } from "./normalize";
 import { listSavedSessions, pickSession } from "./sessions";
@@ -310,12 +310,6 @@ export function resolveUncertain(
 	log.info("queue_uncertain_retried", { origin: originKey, id: picked.platformMessageId, number: Number(number) });
 	return `🔁 전달 불확실 ${number}번을 다시 보냅니다: ${shown}\n이미 처리됐다면 답이 두 번 나올 수 있습니다.`;
 }
-
-const UNCERTAIN_REASON_TEXT: Record<UncertainReason, string> = {
-	steer_threw: "끼워넣기 전송 오류",
-	turn_ended_after_steer: "전송 직후 턴 종료",
-	dispatch_record_failed: "전송 후 장부 기록 실패",
-};
 
 /**
  * Records a side question's outcome when it settles. Deliberately NOT on the serial chain (`#serial`,

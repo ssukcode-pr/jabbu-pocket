@@ -45,19 +45,17 @@ export function rollLabel(change: RollChange, bad: RollBad | undefined): { text:
 	};
 }
 
-/** An inbox card the owner should see arrive: a card not in the last draw, or one that moved to another column. */
+/** An inbox row the owner should see arrive in 내 차례. */
 interface FreshCard {
 	id: string;
 	kind: "card" | "task";
-	col: string;
 	title: string;
-	why: "new" | "moved";
 }
 
 /**
- * New event cards: of `entries`, those whose id was not in the last draw (`prev`: id → column memory) and those whose
- * column changed. The first draw (empty `prev`) and `quiet` (the read marks' first visit) give none. `next` is the
- * memory to keep. Self-contained (shipped to the page).
+ * New event cards: of `entries`, those in 내 차례 (`col` `mine`) that were not there in the last draw (`prev`: id →
+ * group memory) — once per stay, however its reason changes; out and back in counts again. The first draw (empty
+ * `prev`) and `quiet` (the read marks' first visit) give none. `next` is the memory to keep. Self-contained (shipped).
  */
 export function freshCards(
 	prev: Map<string, string>,
@@ -68,16 +66,8 @@ export function freshCards(
 	const cards: FreshCard[] = [];
 	for (const entry of entries) {
 		next.set(entry.id, entry.col);
-		if (prev.size === 0 || quiet) continue;
-		const was = prev.get(entry.id);
-		if (was === entry.col) continue;
-		cards.push({
-			id: entry.id,
-			kind: entry.kind,
-			col: entry.col,
-			title: entry.title,
-			why: was === undefined ? "new" : "moved",
-		});
+		if (prev.size === 0 || quiet || entry.col !== "mine" || prev.get(entry.id) === "mine") continue;
+		cards.push({ id: entry.id, kind: entry.kind, title: entry.title });
 	}
 	return { cards, next };
 }
@@ -87,13 +77,9 @@ export interface StackCard extends FreshCard {
 	at: number;
 }
 
-/** The stack after `fresh` cards arrive: newest first, one per id, at most six kept. Self-contained. */
+/** The stack after `fresh` cards arrive: newest first, one card per arrival (a row back in 내 차례 again is a new one), at most six kept. Self-contained. */
 export function pushStack(list: StackCard[], fresh: FreshCard[], now: number): StackCard[] {
-	const ids = new Set(fresh.map((card) => card.id));
-	return [...fresh.map((card) => ({ ...card, at: now })).reverse(), ...list.filter((card) => !ids.has(card.id))].slice(
-		0,
-		6,
-	);
+	return [...fresh.map((card) => ({ ...card, at: now })).reverse(), ...list].slice(0, 6);
 }
 
 /**
@@ -109,21 +95,15 @@ export function expireStack(list: StackCard[], now: number, since: number, ttl: 
 
 /** The stack's cards as HTML (front card first, three shown) and its one-line announcement. Self-contained. */
 export function stackHtml(list: StackCard[]): { html: string; say: string } {
-	const COLS: Record<string, string> = { attention: "확인 필요", working: "진행 중", wait: "완료·대기" };
 	const shown = list.slice(0, 3);
 	const cards = shown.map((card, i) => {
 		const kind = card.kind === "task" ? "task" : "card";
-		return `<a class="es-card is-${card.col === "attention" ? "attention" : "plain"}" style="--i:${i}" href="?${kind}=${esc(
+		return `<a class="es-card is-attention" style="--i:${i}" href="?${kind}=${esc(
 			encodeURIComponent(card.id),
-		)}" data-${kind}="${esc(card.id)}" data-es-card="${esc(card.id)}"><span class="es-tag">${card.why === "new" ? "새 카드" : "상태 바뀜"} · ${esc(
-			COLS[card.col] ?? card.col,
-		)}</span><span class="es-title">${esc(card.title)}</span></a>`;
+		)}" data-${kind}="${esc(card.id)}" data-es-card="${esc(card.id)}"><span class="es-tag">내 차례</span><span class="es-title">${esc(card.title)}</span></a>`;
 	});
 	const first = list[0];
-	const say =
-		first === undefined
-			? ""
-			: `${first.why === "new" ? "새 카드" : "상태 바뀜"}: ${first.title}${list.length > 1 ? ` 외 ${list.length - 1}건` : ""}`;
+	const say = first === undefined ? "" : `내 차례: ${first.title}${list.length > 1 ? ` 외 ${list.length - 1}건` : ""}`;
 	return {
 		html:
 			list.length === 0

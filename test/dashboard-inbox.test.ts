@@ -212,7 +212,7 @@ const SNAPSHOT: DashboardSnapshot = {
 	jobs: { ok: true, items: [] },
 };
 
-/** The markup of one inbox column (`col-attention`, `col-working`, `col-wait`). */
+/** The markup of one inbox group (`col-mine`, `col-working`, `col-read`, `col-done`). */
 const column = (html: string, id: string): string => {
 	const start = html.indexOf(`id="col-${id}"`);
 	if (start < 0) throw new Error(`no column ${id}`);
@@ -261,7 +261,7 @@ describe("dashboard inbox", () => {
 		expect(anchor(bare, 'data-task="T-20261104-50"')).toContain('href="?task=T-20261104-50"');
 	});
 
-	test("AC-2: the desktop first render has the top bar, the side navigation and three inbox columns", async () => {
+	test("AC-2: the desktop first render has the top bar, the side navigation and the four inbox groups", async () => {
 		const html = await (await fetch(`${serve()}/`)).text();
 		expect(html).toMatch(/<header class="topbar"[^>]*>/);
 		expect(html).toMatch(/<nav class="crumbs" aria-label="위치"><span>jabbu<\/span>.*<span[^>]*>인박스<\/span><\/nav>/);
@@ -284,10 +284,12 @@ describe("dashboard inbox", () => {
 		}
 		// The one alert is a record, not an open gate: the alerts item carries no number.
 		expect(nav).toMatch(/data-view="alerts"[^>]*><span>알림<\/span><svg/);
+		// Without a board: the blocked TASK and the TASK in review are the owner's; the working one is 진행 중.
 		for (const [id, label, count] of [
-			["attention", "확인 필요", 1],
+			["mine", "내 차례", 2],
 			["working", "진행 중", 1],
-			["wait", "완료·대기", 1],
+			["read", "읽을 것", 0],
+			["done", "확인함", 0],
 		] as const) {
 			expect(column(html, id)).toMatch(
 				new RegExp(`<h2 class="col-head"><span>${label}</span><span class="count-chip">${count}</span></h2>`),
@@ -295,42 +297,42 @@ describe("dashboard inbox", () => {
 		}
 	});
 
-	test("AC-3: a TASK with an agent is one card; an open TASK without one is a lone card under 확인 필요", () => {
+	test("AC-3: a TASK with an agent is one row; an open TASK without one is a lone row under 내 차례", () => {
 		const html = renderDashboardMain(SNAPSHOT, BOARD, NOW);
-		const inbox = ["attention", "working", "wait"].map((id) => column(html, id)).join("");
+		const inbox = ["mine", "working", "read", "done"].map((id) => column(html, id)).join("");
 		expect(inbox.split("T-20261104-50").length - 1).toBe(1);
 		expect(inbox.split('data-card="w1:p1"').length - 1).toBe(1);
 		expect(column(html, "working")).toContain('data-card="w1:p1"');
-		const attention = column(html, "attention");
-		expect(attention).toContain('data-task="T-20261104-51"');
-		expect(attention).toContain('data-task="T-20261104-52"');
-		expect(attention).toContain('data-card="w1:p2"');
-		// A closed TASK is no card: only a row of the folded "최근 닫힘" list at the bottom of 완료·대기.
+		const mine = column(html, "mine");
+		expect(mine).toContain('data-task="T-20261104-51"');
+		expect(mine).toContain('data-task="T-20261104-52"');
+		expect(mine).toContain('data-card="w1:p2"');
+		// A closed TASK is no row: only a row of the folded "최근 닫힘" list at the bottom of 확인함.
 		expect(anchor(html, 'data-task="T-20261103-09"')).toStartWith('<a class="closed-row"');
-		expect(column(html, "wait")).toMatch(/최근 닫힘 <span class="count-chip">1<\/span>/);
+		expect(column(html, "done")).toMatch(/최근 닫힘 <span class="count-chip">1<\/span>/);
 	});
 
-	test("AC-4: a TASK card shows its title, PROGRESS step, status badge, AC n/m and 단계 n/m", () => {
+	test("AC-4: a TASK row shows its title, then TASK ID, one state word and its PROGRESS step as the reason", () => {
 		const html = renderDashboardMain(SNAPSHOT, BOARD, NOW);
 		const merged = anchor(html, 'data-card="w1:p1"');
-		expect(merged).toContain('<p class="card-title">인박스 셸</p>');
-		expect(merged).toContain('<p class="card-sum">S3 셸 구현</p>');
-		expect(merged).toMatch(/<span class="badge is-info">진행 중<\/span>/);
-		expect(merged).toContain("AC 3/13");
-		expect(merged).toContain("단계 2/7");
-		const lone = anchor(column(html, "attention"), 'data-task="T-20261104-51"');
-		expect(lone).toContain('<p class="card-title">막힌 작업</p>');
-		expect(lone).toMatch(/<span class="badge is-warning">막힘<\/span>/);
-		expect(lone).toContain("AC 1/2");
-		expect(lone).toContain("단계 0/3");
+		expect(merged).toContain('<span class="t1">인박스 셸</span>');
+		expect(merged).toContain('<b class="tw">진행 중</b>');
+		expect(merged).toContain("<span>S3 셸 구현</span>");
+		expect(merged).toContain("T-20261104-50");
+		// One state word: no badge row, no AC/단계 figures on the row (they stay in the detail panel).
+		expect(merged).not.toContain('class="badge');
+		expect(merged).not.toContain("AC 3/13");
+		const lone = anchor(column(html, "mine"), 'data-task="T-20261104-51"');
+		expect(lone).toContain('<span class="order-no">1</span>막힌 작업</span>');
+		expect(lone).toContain('<b class="tw">확인 필요</b>');
+		expect(lone).toContain("<span>워커 사라짐</span>");
 	});
 
-	test("a working TASK whose agent finished shows 판정 대기 in 완료·대기, not 진행 중", () => {
+	test("a working TASK whose agent finished shows 판정 대기 in 진행 중 (the sweep's turn)", () => {
 		const board: BoardView = { ...BOARD, cards: [card("w1:p1", "done", "done", { taskId: "T-20261104-50" })] };
-		const merged = anchor(column(renderDashboardMain(SNAPSHOT, board, NOW), "wait"), 'data-card="w1:p1"');
-		expect(merged).toMatch(/<span class="badge ">판정 대기<\/span>/);
-		expect(merged).not.toContain(">진행 중</span>");
-		expect(merged).toContain("워커 완료");
+		const merged = anchor(column(renderDashboardMain(SNAPSHOT, board, NOW), "working"), 'data-card="w1:p1"');
+		expect(merged).toContain('<b class="tw">판정 대기</b>');
+		expect(merged).not.toContain(">진행 중</b>");
 	});
 
 	test("AC-5: ?card=, ?task= and ?view= start the page with that detail or view; unknown values say so", async () => {
@@ -390,7 +392,7 @@ describe("dashboard inbox", () => {
 		expect(unknownTask).toMatch(/data-view="inbox"[^>]*aria-current="page"/);
 	});
 
-	test("AC-6: ?view=list draws one table, 확인 필요 → 진행 중 → 완료·대기", async () => {
+	test("AC-6: ?view=list draws one table, 내 차례 → 진행 중 → 읽을 것 → 확인함", async () => {
 		const html = await (await fetch(`${serve()}/?view=list`)).text();
 		const head = /<thead>([\s\S]*?)<\/thead>/.exec(html)?.[1] ?? "";
 		expect([...head.matchAll(/<th[^>]*>(?:<button[^>]*>)?([^<]+)/g)].map((match) => match[1])).toEqual([
@@ -402,11 +404,12 @@ describe("dashboard inbox", () => {
 			"경과",
 		]);
 		const order = [...html.matchAll(/<tr[^>]*data-row="([^"]+)"/g)].map((match) => match[1]);
-		expect(order).toEqual(["T-20261104-51", "T-20261104-50", "T-20261104-52"]);
+		// The TASK in review waits for the owner's decision: 내 차례, after the failed one.
+		expect(order).toEqual(["T-20261104-51", "T-20261104-52", "T-20261104-50"]);
 
 		const board = renderDashboardMain(SNAPSHOT, BOARD, NOW, { view: "list" });
 		const keys = [...board.matchAll(/<tr[^>]*data-row="([^"]+)"/g)].map((match) => match[1]);
-		// 확인 필요 in the one order: failed (worker gone), blocked, no agent card; a done pane with no TASK is 완료·대기.
+		// 내 차례 in the one order: failed (worker gone), blocked, the decision; a pane with no TASK is 확인함.
 		expect(keys).toEqual(["T-20261104-51", "w1:p2", "T-20261104-52", "w1:p1", "m-ssh:w9:p1", "m-ssh:w9:p2"]);
 	});
 
@@ -435,7 +438,7 @@ describe("dashboard inbox", () => {
 		};
 		const expected = ["T-20261104-60", "w2:b30", "w2:b10", "T-20261104-61"];
 		expect(inboxAttention(snapshot, board).map((entry) => entry.id)).toEqual(expected);
-		const attention = column(renderDashboardMain(snapshot, board, NOW), "attention");
+		const attention = column(renderDashboardMain(snapshot, board, NOW), "mine");
 		expect([...attention.matchAll(/data-row="([^"]+)"/g)].map((match) => match[1])).toEqual(expected);
 		expect([...attention.matchAll(/data-row="([^"]+)" data-order="(\d)"/g)].map((m) => `${m[2]}:${m[1]}`)).toEqual(
 			expected.map((id, index) => `${index + 1}:${id}`),
@@ -571,7 +574,9 @@ describe("dashboard polish", () => {
 		const noMatch = renderDashboardMain(SNAPSHOT, BOARD, NOW, { q: "없는검색어123" });
 		expect(noMatch).toContain("'없는검색어123'와 맞는 항목이 없어요.");
 		expect(noMatch).toContain("data-clear-search");
-		expect(noMatch).not.toContain('id="col-working"');
+		// A search dims the rows it leaves out instead of dropping them, so the groups keep their place.
+		expect(noMatch).toContain('id="col-working"');
+		expect(noMatch).toMatch(/class="card trow is-working is-dim"[^>]*data-card="w1:p1"/);
 
 		const down = renderDashboardMain(
 			{
