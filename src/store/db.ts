@@ -68,15 +68,13 @@ import {
 } from "./db-rows";
 import {
 	APPROVALS_DDL,
-	INBOUND_DDL,
-	INBOUND_INDEX_NAMES,
-	INBOUND_INDEXES_DDL,
 	INBOUND_THREAD_INDEX_DDL,
 	LANE_BOARD_TEXT_MAX,
 	LANES_DDL,
 	PEER_CALL_KEEP_MS,
 	SCHEMA,
 } from "./db-schema";
+import { migrateInbound } from "./db-sending";
 import { laneDurationSamples, TURN_SAMPLE_LIMIT, TURN_SAMPLE_WINDOW_MS } from "./lane-duration";
 import { migrateOldNames } from "./rename-migration";
 import { checkSchemaVersion, stampSchemaVersion } from "./schema-version";
@@ -136,6 +134,10 @@ interface AlertIncident {
 
 export type { DeliveryState, InboundState, UncertainReason } from "./transitions";
 export { StoreError } from "./transitions";
+
+/** Inbound rows per state; a `sending` row (mid-send) counts as `dispatched`, the running turn it starts or joins. */
+export const INBOUND_COUNT_SQL =
+	"SELECT CASE state WHEN 'sending' THEN 'dispatched' ELSE state END AS state, COUNT(*) AS n FROM inbound GROUP BY 1";
 
 interface StoreClock {
 	now(): number;
@@ -200,9 +202,9 @@ export interface InboundConflict {
 /** Signature parameters of an attachment URL (Discord CDN `ex`·`is`·`hm`) change on every delivery of the same file. */
 const SIGNED_URL_PARAM = /([?&](?:ex|is|hm)=)[^&\s"'<>)\]]*/g;
 
-/** The text a message id stands for: its content without the signature queries of its attachment URLs. */
+/** A message id's text without attachment URL signatures or quote fence ids (random per `normalizeInbound` wrap). */
 function inboundIdentity(text: string): string {
-	return text.replace(SIGNED_URL_PARAM, "$1");
+	return text.replace(SIGNED_URL_PARAM, "$1").replace(/^(<<<(?:end-)?quoted-)[0-9a-f]+>>>$/gm, "$1>>>");
 }
 
 const sha12 = (text: string): string => createHash("sha256").update(text).digest("hex").slice(0, 12);
@@ -681,10 +683,10 @@ export class Store {
 		return rows.map(toInbound);
 	}
 
-	/** Per-state inbound row counts (`GROUP BY`); lets /status count without loading every row. */
+	/** Per-state inbound row counts (`GROUP BY`, `sending` counted as dispatched); /status counts without loading rows. */
 	countInboundByState(): Partial<Record<InboundState, number>> {
 		const counts: Partial<Record<InboundState, number>> = {};
-		for (const row of this.db.query("SELECT state, COUNT(*) AS n FROM inbound GROUP BY state").all() as Array<{
+		for (const row of this.db.query(INBOUND_COUNT_SQL).all() as Array<{
 			state: InboundState;
 			n: number;
 		}>) {
@@ -716,7 +718,22 @@ export class Store {
 		return this.requireInbound(platformMessageId);
 	}
 
-	/** pending -> uncertain: the input may already have reached the omp child, so nothing replays it until the owner decides. */
+	/** pending -> sending: the write-ahead right before a prompt or steer, with the leafId cursor taken before it. */
+	markSending(platformMessageId: string, entryCursor: string | null): InboundRow {
+		assertInboundTransition(this.requireInbound(platformMessageId).state, "sending");
+		this.db
+			.query("UPDATE inbound SET state = 'sending', entry_cursor = ? WHERE platform_message_id = ?")
+			.run(entryCursor, platformMessageId);
+		return this.requireInbound(platformMessageId);
+	}
+
+	/** Every `sending` row (of one origin, or all) -> uncertain: a send that never got its outcome is never repeated. */
+	parkSending(originKey?: string): InboundRow[] {
+		const rows = this.listInbound({ originKey, state: "sending" });
+		return rows.map((row) => this.markUncertain(row.platformMessageId, "send_interrupted"));
+	}
+
+	/** pending|sending -> uncertain: the input may already have reached the omp child, so nothing replays it until the owner decides. */
 	markUncertain(platformMessageId: string, reason: UncertainReason): InboundRow {
 		const current = this.requireInbound(platformMessageId);
 		assertInboundTransition(current.state, "uncertain");
@@ -730,8 +747,17 @@ export class Store {
 
 	/** uncertain -> pending: the owner's explicit retry; the next drain sends it from scratch. */
 	retryUncertain(platformMessageId: string): InboundRow {
-		const current = this.requireInbound(platformMessageId);
-		assertInboundTransition(current.state, "pending");
+		return this.backToPending(platformMessageId, "uncertain");
+	}
+
+	/** sending -> pending: the omp child certainly never got the input (`not_started`), so it may be sent again. */
+	releaseSending(platformMessageId: string): InboundRow {
+		return this.backToPending(platformMessageId, "sending");
+	}
+
+	private backToPending(platformMessageId: string, from: "uncertain" | "sending"): InboundRow {
+		const { state } = this.requireInbound(platformMessageId);
+		if (state !== from) throw new StoreError("invalid_transition", `inbound ${state} -> pending (expected ${from})`);
 		this.db.query("UPDATE inbound SET state = 'pending' WHERE platform_message_id = ?").run(platformMessageId);
 		return this.requireInbound(platformMessageId);
 	}
@@ -977,7 +1003,7 @@ export class Store {
 		body: string,
 	): void {
 		if (threads.length === 0) return;
-		const first = (body.split("\n").find((line) => line.trim() !== "") ?? "").trim().slice(0, 200);
+		const first = cutCodePointSafe((body.split("\n").find((line) => line.trim() !== "") ?? "").trim(), 200);
 		const answered = parseThreadRef(input.threadRef);
 		const link =
 			answered === undefined || answered.threadTs === TOP_LEVEL_TS
@@ -2215,7 +2241,7 @@ export class Store {
 		for (const { name } of teamsTables) this.db.run(`DROP TABLE IF EXISTS "${name}"`);
 		this.db.run("UPDATE inbound SET thread_ref = platform_message_id WHERE thread_ref IS NULL");
 		this.db.run(INBOUND_THREAD_INDEX_DDL);
-		this.migrateInbound();
+		migrateInbound(this.db);
 		this.migrateApprovals();
 		this.migrateLanes();
 		// After the rebuild (which already creates the dashboard columns): a 'replied'-era table lacks them, and every
@@ -2230,42 +2256,6 @@ export class Store {
 		// pre-'replied' ledger would end this open without it; run on every open, the 'pending' scan stays indexed.
 		this.db.run("CREATE INDEX IF NOT EXISTS approvals_status ON approvals(status)");
 		migrateOldNames(this.db);
-	}
-
-	/**
-	 * The `uncertain` state widens a CHECK constraint, which SQLite cannot ALTER: an inbound table without it is rebuilt
-	 * (rename, create, copy, drop) in one transaction. A RENAME keeps the old table's indexes under their names, so they
-	 * are dropped first and all seven recreated on the new table. `inbound_id` is copied as is, so the AUTOINCREMENT
-	 * sequence carries on; the new columns stay NULL. `inbound.origin_key` references `origins`, and a long-lived ledger
-	 * holds rows whose origin is gone (2026-11-20: 522 answered rows of removed Slack threads), so the copy runs with
-	 * `foreign_keys` off, as SQLite's table-rebuild procedure prescribes; the pragma is a no-op inside a transaction, so
-	 * it is switched around it. The rows keep exactly the references they had.
-	 */
-	private migrateInbound(): void {
-		const current = this.db.query("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'inbound'").get() as {
-			sql: string;
-		} | null;
-		if (current === null || current.sql.includes("'uncertain'")) return;
-		this.db.run("PRAGMA foreign_keys = OFF");
-		try {
-			this.rebuildInbound();
-		} finally {
-			this.db.run("PRAGMA foreign_keys = ON");
-		}
-	}
-
-	private rebuildInbound(): void {
-		this.db.transaction(() => {
-			this.db.run("ALTER TABLE inbound RENAME TO inbound_old");
-			for (const name of INBOUND_INDEX_NAMES) this.db.run(`DROP INDEX IF EXISTS ${name}`);
-			this.db.run(INBOUND_DDL);
-			this.db.run(
-				"INSERT INTO inbound (inbound_id, platform_message_id, origin_key, epoch, text_ref, state, created_at, dispatched_at, op_ref, entry_cursor, thread_ref, last_event_at, peer_user_id, injected) SELECT inbound_id, platform_message_id, origin_key, epoch, text_ref, state, created_at, dispatched_at, op_ref, entry_cursor, thread_ref, last_event_at, peer_user_id, injected FROM inbound_old",
-			);
-			this.db.run("DROP TABLE inbound_old");
-			this.db.run(INBOUND_INDEXES_DDL);
-			this.db.run(INBOUND_THREAD_INDEX_DDL);
-		})();
 	}
 
 	/**
@@ -2450,7 +2440,11 @@ export class DeliveryLedger {
 	}
 
 	resolveAmbiguous(deliveryId: number, how: "ack" | "resend"): DeliveryRow {
-		return this.#db.transaction(() => resolveAmbiguousDelivery(this.#db, this.#clock.now(), deliveryId, how))();
+		// IMMEDIATE: the resolve reads the row, then writes it. A deferred transaction that reads first fails at once with
+		// SQLITE_BUSY (busy_timeout never applies) when the daemon commits in between; this one waits for the lock.
+		return this.#db
+			.transaction(() => resolveAmbiguousDelivery(this.#db, this.#clock.now(), deliveryId, how))
+			.immediate();
 	}
 
 	close(): void {
@@ -2469,4 +2463,4 @@ export function openDeliveryLedger(path: string, clock?: StoreClock): DeliveryLe
 		throw error;
 	}
 	return new DeliveryLedger(db, clock);
-}
+	}
