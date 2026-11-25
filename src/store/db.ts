@@ -2463,4 +2463,4 @@ export function openDeliveryLedger(path: string, clock?: StoreClock): DeliveryLe
 		throw error;
 	}
 	return new DeliveryLedger(db, clock);
-	}
+}
