@@ -2150,6 +2150,8 @@ describe("runApply code rollback in a real git repository (AC-2..AC-5)", () => {
 		};
 	}
 
+	// Real git spawns under a loaded host: the rollback flow alone passed bun's 5 s default (full suite,
+	// 2026-11-27). A bound, not a wait: a hung rollback still fails the test.
 	test("U1: a code rollback restores the pre-apply snapshot when the ledger is newer than the rolled-back code", async () => {
 		const { r, backupFile } = u1Scene();
 		const world = failingWorld();
@@ -2190,7 +2192,7 @@ describe("runApply code rollback in a real git repository (AC-2..AC-5)", () => {
 		expect(codeStep(receipt)?.detail).toContain("ledger schema v13 > rolled-back code v12");
 		expect(codeStep(receipt)?.detail).toContain(`db restored from ${backupFile}`);
 		expect(sh("git rev-parse HEAD^{tree}")).toBe(sh(`git rev-parse ${r.good}^{tree}`));
-	});
+	}, 30_000);
 
 	test("U1: without a restore path the code rollback fails fast and names jabbu-pocket restore", async () => {
 		const { r, backupFile } = u1Scene();
@@ -2219,7 +2221,7 @@ describe("runApply code rollback in a real git repository (AC-2..AC-5)", () => {
 		expect(sh("git rev-parse HEAD^{tree}")).toBe(sh(`git rev-parse ${r.good}^{tree}`));
 		const inject = world.injects[0] as { text: string };
 		expect(inject.text).toContain(`jabbu-pocket restore ${backupFile}`);
-	});
+	}, 30_000);
 
 	test("U1: a ledger the rolled-back code can open rolls back without a restore", async () => {
 		const { r } = u1Scene(12);
@@ -2238,7 +2240,7 @@ describe("runApply code rollback in a real git repository (AC-2..AC-5)", () => {
 		expect(world.commands.filter((c) => c[0] === "systemctl" && c[2] === "stop")).toHaveLength(0);
 		expect(codeStep(receipt)?.detail ?? "").not.toContain("db restore");
 		expect(sh("git rev-parse HEAD^{tree}")).toBe(sh(`git rev-parse ${r.good}^{tree}`));
-	});
+	}, 30_000);
 
 	test("U1: a failed db restore fails the code rollback and names jabbu-pocket restore", async () => {
 		const { backupFile } = u1Scene();
@@ -2253,7 +2255,7 @@ describe("runApply code rollback in a real git repository (AC-2..AC-5)", () => {
 		expect(codeStep(receipt)?.detail).toContain(`jabbu-pocket restore ${backupFile}`);
 		expect(restartCommands(world)).toHaveLength(2);
 		expect(world.commands.filter((c) => c[0] === "systemctl" && c[2] === "stop")).toHaveLength(1);
-	});
+	}, 30_000);
 
 	describe("apply.codeRollback detach and off (apply-rollback-mode)", () => {
 		const detach: ApplyOptions = { ...base, codeRollback: "detach" };
