@@ -1,31 +1,20 @@
 import { appendFileSync, closeSync, existsSync, fstatSync, openSync, readFileSync, readSync } from "node:fs";
 import type { Logger } from "../log";
 import { redact } from "../redact";
+import { type CandidateKind, compactLedger, DAY_MS, type LedgerEvent } from "./ledger";
+
+export { type LedgerEvent, parseLedger } from "./ledger";
 
 /**
  * Improvement-candidate ledger: the self-retro appends one `seen` line per problem to
  * `<workspace>/candidates.jsonl`; the daemon folds it deterministically (no model call), and a problem seen on
  * `minDays` distinct days inside the window becomes a candidate — a #log line in `log` mode, an owner approval card in
  * `card` mode. Approval only registers an experiment skeleton in experiments.md; the fix itself is done separately.
+ * Each pass compacts the ledger first (`compactLedger` in `./ledger.ts`): the file is append-only, so
+ * without pruning every 5-minute sweep would re-read history that can never become due again.
  */
 
-export type CandidateKind = "rule" | "fix" | "persona";
 export type CandidateStatus = "open" | "proposed" | "approved" | "rejected";
-
-export type LedgerEvent =
-	| {
-			v: 1;
-			ts: string;
-			key: string;
-			event: "seen";
-			day: string;
-			kind: CandidateKind;
-			evidence: string;
-			summary: string;
-	  }
-	| { v: 1; ts: string; key: string; event: "proposed"; via: "log" | "card"; ref?: string }
-	| { v: 1; ts: string; key: string; event: "approved"; experiment: string }
-	| { v: 1; ts: string; key: string; event: "rejected" };
 
 export interface CandidatesSettings {
 	enabled: boolean;
@@ -63,61 +52,6 @@ export interface Candidate {
 	rejections: number;
 	lastProposedAt?: number;
 	lastRejectedAt?: number;
-}
-
-const DAY_MS = 86_400_000;
-const KEY = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
-const DAY = /^\d{4}-\d{2}-\d{2}$/;
-const KINDS: Record<string, true> = { rule: true, fix: true, persona: true };
-
-const str = (value: unknown): value is string => typeof value === "string";
-
-/** One line to an event, or undefined for anything malformed (wrong `v`, unknown event, missing field). */
-function parseLine(line: string): LedgerEvent | undefined {
-	let raw: unknown;
-	try {
-		raw = JSON.parse(line);
-	} catch {
-		return undefined;
-	}
-	if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return undefined;
-	const r = raw as Record<string, unknown>;
-	if (r.v !== 1 || !str(r.ts) || Number.isNaN(Date.parse(r.ts)) || !str(r.key) || !KEY.test(r.key)) return undefined;
-	const base = { v: 1 as const, ts: r.ts, key: r.key };
-	switch (r.event) {
-		case "seen":
-			if (!str(r.day) || !DAY.test(r.day) || Number.isNaN(Date.parse(`${r.day}T00:00:00Z`))) return undefined;
-			if (!str(r.kind) || KINDS[r.kind] !== true || !str(r.summary)) return undefined;
-			if (r.evidence !== undefined && !str(r.evidence)) return undefined;
-			return {
-				...base,
-				event: "seen",
-				day: r.day,
-				kind: r.kind as CandidateKind,
-				evidence: r.evidence ?? "",
-				summary: r.summary,
-			};
-		case "proposed":
-			if (r.via !== "log" && r.via !== "card") return undefined;
-			return { ...base, event: "proposed", via: r.via, ...(str(r.ref) ? { ref: r.ref } : {}) };
-		case "approved":
-			if (!str(r.experiment)) return undefined;
-			return { ...base, event: "approved", experiment: r.experiment };
-		case "rejected":
-			return { ...base, event: "rejected" };
-		default:
-			return undefined;
-	}
-}
-
-/** The ledger text to events in file order; blank, broken and other-version lines are skipped, never thrown. */
-export function parseLedger(text: string): LedgerEvent[] {
-	const events: LedgerEvent[] = [];
-	for (const line of text.split("\n")) {
-		const event = line.trim() === "" ? undefined : parseLine(line);
-		if (event !== undefined) events.push(event);
-	}
-	return events;
 }
 
 /**
@@ -303,11 +237,8 @@ export async function runCandidateProposals(deps: CandidateRunDeps, gate: Candid
 	if (!settings.enabled || gate.frozen || gate.draining || gate.openCards > 0) return [];
 	if (!existsSync(deps.ledgerPath)) return [];
 	const now = deps.now();
-	const due = dueCandidates(
-		foldCandidates(parseLedger(readFileSync(deps.ledgerPath, "utf8")), now, settings),
-		settings,
-		now,
-	);
+	const events = compactLedger(deps.ledgerPath, now, settings, log);
+	const due = dueCandidates(foldCandidates(events, now, settings), settings, now);
 	if (due.length === 0) return [];
 	const ts = (): string => new Date(deps.now()).toISOString();
 

@@ -19,6 +19,7 @@ import {
 	resolveCandidates,
 	runCandidateProposals,
 } from "../src/review/candidates";
+import { compactLedger, MAX_LEDGER_BYTES } from "../src/review/ledger";
 
 const DAY = 86_400_000;
 const NOW = Date.parse("2026-11-12T00:00:00Z");
@@ -307,6 +308,136 @@ describe("gate", () => {
 		rmSync(h.deps.ledgerPath);
 		expect(await runCandidateProposals(h.deps, OPEN)).toEqual([]);
 		expect(existsSync(h.deps.ledgerPath)).toBe(false);
+	});
+});
+
+describe("ledger compaction", () => {
+	const writeLedger = (events: LedgerEvent[], extra = ""): string => {
+		const path = join(dir, "candidates.jsonl");
+		writeFileSync(path, `${events.map((e) => JSON.stringify(e)).join("\n")}\n${extra}`);
+		return path;
+	};
+	const proposed = (key: string, at: number, via: "log" | "card" = "log"): LedgerEvent => ({
+		v: 1,
+		ts: iso(at),
+		key,
+		event: "proposed",
+		via,
+	});
+	const rejected = (key: string, at: number): LedgerEvent => ({ v: 1, ts: iso(at), key, event: "rejected" });
+
+	test("compaction drops stale seen days and superseded proposals, keeps the fold identical", () => {
+		const events: LedgerEvent[] = [
+			...seenDays("live", 3),
+			proposed("live", NOW - 20 * DAY),
+			proposed("live", NOW - DAY),
+			seen("ghost", dayOf(NOW - 32 * DAY)),
+			seen("ghost", dayOf(NOW - 31 * DAY)),
+			seen("ghost", dayOf(NOW - 30 * DAY)),
+			...seenDays("done", 3),
+			{ v: 1, ts: iso(NOW - DAY), key: "done", event: "approved", experiment: "E-20261111-01" },
+			...seenDays("twice", 3),
+			rejected("twice", NOW - 30 * DAY),
+			proposed("twice", NOW - 20 * DAY, "card"),
+			rejected("twice", NOW - 19 * DAY),
+		];
+		const path = writeLedger(events, "{not json\n\n");
+		const before = parseLedger(readFileSync(path, "utf8"));
+		const foldedBefore = fold(before);
+		const dueBefore = due(before);
+		const kept = compactLedger(path, NOW, S, silentLog);
+		const afterText = readFileSync(path, "utf8");
+		const after = parseLedger(afterText);
+		expect(kept).toEqual(after);
+		expect(fold(after)).toEqual(foldedBefore);
+		expect(due(after)).toEqual(dueBefore);
+		// Stale days are gone, the latest stale day stays (the fold reads kind/summary from it).
+		expect(afterText).not.toContain(dayOf(NOW - 32 * DAY));
+		expect(afterText).not.toContain(dayOf(NOW - 31 * DAY));
+		expect(afterText).toContain(dayOf(NOW - 30 * DAY));
+		expect(afterText).not.toContain("{not json");
+		expect(after.filter((e) => e.key === "live" && e.event === "proposed")).toHaveLength(1);
+		expect(after.find((e) => e.key === "done" && e.event === "approved")).toBeDefined();
+		expect(after.filter((e) => e.key === "twice" && e.event === "rejected")).toHaveLength(2);
+		expect(fold(after).find((c) => c.key === "twice")?.rejections).toBe(2);
+	});
+
+	test("compaction keeps a proposed line after two rejections: the key stays due, not twice-rejected", () => {
+		const events: LedgerEvent[] = [
+			...seenDays("twice", 3),
+			rejected("twice", NOW - 30 * DAY),
+			rejected("twice", NOW - 25 * DAY),
+			proposed("twice", NOW - 20 * DAY, "card"),
+		];
+		expect(due(events)).toEqual(["twice"]);
+		const path = writeLedger(events);
+		compactLedger(path, NOW, S, silentLog);
+		const after = parseLedger(readFileSync(path, "utf8"));
+		expect(fold(after)[0]?.status).toBe("proposed");
+		expect(fold(after)[0]?.rejections).toBe(2);
+		expect(due(after)).toEqual(["twice"]);
+	});
+
+	test("compaction keeps a proposed line still within its snooze and a no-op pass leaves the file alone", () => {
+		const snoozed = [...seenDays("snoozed", 3), proposed("snoozed", NOW - DAY)];
+		expect(due(snoozed)).toEqual([]);
+		const path = writeLedger(snoozed);
+		compactLedger(path, NOW, S, silentLog);
+		const afterText = readFileSync(path, "utf8");
+		expect(afterText).toContain('"event":"proposed"');
+		expect(due(parseLedger(afterText))).toEqual([]);
+
+		const fresh = writeLedger(seenDays("fresh", 3));
+		const freshBefore = readFileSync(fresh, "utf8");
+		expect(compactLedger(fresh, NOW, S, silentLog)).toHaveLength(3);
+		expect(readFileSync(fresh, "utf8")).toBe(freshBefore);
+	});
+
+	test("compaction keeps unknown fields on kept lines byte-identical", () => {
+		const staleOld = JSON.stringify(seen("ghost", dayOf(NOW - 41 * DAY)));
+		const staleLatest = JSON.stringify(seen("ghost", dayOf(NOW - 40 * DAY)));
+		const live = JSON.stringify({ ...seen("live", dayOf(NOW - DAY)), note: "keep-me" });
+		const path = join(dir, "candidates.jsonl");
+		writeFileSync(path, `${staleOld}\n${staleLatest}\n${live}\n`);
+		compactLedger(path, NOW, S, silentLog);
+		const afterText = readFileSync(path, "utf8");
+		expect(afterText).not.toContain(dayOf(NOW - 41 * DAY));
+		expect(afterText).toContain('"note":"keep-me"');
+		expect(afterText).toContain(live);
+	});
+
+	test("a pass compacts a stale ledger and still raises the due candidate", async () => {
+		const events: LedgerEvent[] = [
+			seen("ghost", dayOf(NOW - 42 * DAY)),
+			seen("ghost", dayOf(NOW - 41 * DAY)),
+			seen("ghost", dayOf(NOW - 40 * DAY)),
+			...seenDays("live", 3),
+		];
+		const h = harness(events);
+		await runCandidateProposals(h.deps, OPEN);
+		expect(h.notes).toHaveLength(1);
+		expect(h.notes[0]).toContain("live");
+		const afterText = readFileSync(h.deps.ledgerPath, "utf8");
+		expect(afterText).not.toContain(dayOf(NOW - 42 * DAY));
+		expect(afterText).not.toContain(dayOf(NOW - 41 * DAY));
+		expect(afterText).toContain(dayOf(NOW - 40 * DAY));
+	});
+
+	test("a ledger over 1 MiB warns candidate_ledger_large", () => {
+		const lines: string[] = [];
+		let bytes = 0;
+		for (let i = 0; bytes < MAX_LEDGER_BYTES + 1024; i++) {
+			const line = JSON.stringify(seen(`k-${i}`, dayOf(NOW - DAY)));
+			lines.push(line);
+			bytes += Buffer.byteLength(line) + 1;
+		}
+		const path = join(dir, "candidates.jsonl");
+		writeFileSync(path, `${lines.join("\n")}\n`);
+		expect(Buffer.byteLength(readFileSync(path, "utf8"))).toBeGreaterThan(MAX_LEDGER_BYTES);
+		const captured: string[] = [];
+		const capturing = createLogger({ sink: (line) => captured.push(line), clock: { now: () => NOW }, redact });
+		compactLedger(path, NOW, S, capturing);
+		expect(captured.some((line) => line.includes("event=candidate_ledger_large"))).toBe(true);
 	});
 });
 
