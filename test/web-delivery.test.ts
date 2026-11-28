@@ -32,6 +32,8 @@ function open(dir: string, clock: { now(): number }): Store {
 
 function sourceFor(store: Store, failed: Array<{ id: number; outcome: string }>, confirmThrows: { now: boolean }) {
 	const deliveries: DeliverySource = {
+		// The daemon wires the web source this way: a recovered repost cannot duplicate the answer.
+		repostIsIdempotent: true,
 		claimDue: () =>
 			store.claimDue(undefined, "web").map(
 				(r): DeliveryItem => ({

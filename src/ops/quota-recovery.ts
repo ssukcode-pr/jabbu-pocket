@@ -229,6 +229,12 @@ function toSnapshot(hold: InternalHold): RuntimeQuotaHold {
 	};
 }
 
+// A hold blocks until the later of the 5h safety window and a known reset: a weekly hold is not retried
+// every 5h, while a hold past its reset still waits for a poll to confirm headroom.
+function holdBlocks(hold: InternalHold, now: number): boolean {
+	return now - hold.hitAt < FALLBACK_QUOTA_RELEASE_MS || (hold.resetAt !== undefined && now < hold.resetAt);
+}
+
 /** 공급자 한도 오류로 보류된 대화방과 복구 감시 상태를 추적한다. */
 export class QuotaRecoveryTracker {
 	readonly #holds = new Map<string, InternalHold>();
@@ -277,17 +283,13 @@ export class QuotaRecoveryTracker {
 		const normalized = provider?.trim().toLowerCase();
 		if (normalized !== undefined && normalized !== "") {
 			const exact = this.#holds.get(normalized);
-			if (
-				exact !== undefined &&
-				!isLifted(exact.provider, now, lifts) &&
-				now - exact.hitAt < FALLBACK_QUOTA_RELEASE_MS
-			) {
+			if (exact !== undefined && !isLifted(exact.provider, now, lifts) && holdBlocks(exact, now)) {
 				return toSnapshot(exact);
 			}
 		}
 		if (originKey !== undefined) {
 			const wild = this.#holds.get("*");
-			if (wild?.origins.has(originKey) && !isLifted("*", now, lifts) && now - wild.hitAt < FALLBACK_QUOTA_RELEASE_MS) {
+			if (wild?.origins.has(originKey) && !isLifted("*", now, lifts) && holdBlocks(wild, now)) {
 				return toSnapshot(wild);
 			}
 		}
@@ -339,7 +341,7 @@ export class QuotaRecoveryTracker {
 				events.push({ provider, origins: [...hold.origins].sort(), reason: "manual_lift" });
 				continue;
 			}
-			if (now - hold.hitAt >= FALLBACK_QUOTA_RELEASE_MS) {
+			if (!holdBlocks(hold, now)) {
 				this.#holds.delete(provider);
 				events.push({ provider, origins: [...hold.origins].sort(), reason: "safety_timeout" });
 			}

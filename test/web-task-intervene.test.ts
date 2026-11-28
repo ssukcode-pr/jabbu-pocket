@@ -138,7 +138,13 @@ async function accessJwt(email: string): Promise<{ jwt: string; jwk: JwkKey }> {
 	const pair = await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, ["sign", "verify"]);
 	const jwk = { ...(await crypto.subtle.exportKey("jwk", pair.publicKey)), kid: "kid-task", alg: "ES256" };
 	const head = b64url(JSON.stringify({ alg: "ES256", kid: "kid-task" }));
-	const claims = { aud: AUD, iss: `https://${TEAM}`, exp: Math.floor(Date.now() / 1000) + 300, email };
+	const claims = {
+		aud: AUD,
+		iss: `https://${TEAM}`,
+		exp: Math.floor(Date.now() / 1000) + 300,
+		iat: Math.floor(Date.now() / 1000) - 10,
+		email,
+	};
 	const payload = b64url(JSON.stringify(claims));
 	const sig = await crypto.subtle.sign(
 		{ name: "ECDSA", hash: "SHA-256" },

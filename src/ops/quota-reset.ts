@@ -190,6 +190,10 @@ export function executeQuotaReset(deps: {
 	if (gateHeld) {
 		writeQuotaLift(deps.homeDir, { provider: lower, untilMs: deps.now + 60 * 60_000, now: deps.now });
 		deps.onClearLifts();
+		// Like the `all` branch (snapshot) and `clear-lifts` (poll): the snapshot and the next usage
+		// poll must reflect the lift at once, not up to `pollMinutes` later.
+		deps.onSaveSnapshot();
+		deps.onPollNow();
 	}
 	deps.log.info("quota_usage_reset", { target: lower, clearedRuntime: ev !== undefined ? 1 : 0, liftedGate });
 	return formatUsageResetResult({

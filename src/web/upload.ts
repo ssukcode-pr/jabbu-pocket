@@ -9,6 +9,8 @@ import { isInside } from "../safety/inside";
 /** Maximum uploaded file size on web chat (25 MiB per file, matching `MAX_INBOUND_IMAGE_BYTES`). */
 export const WEB_UPLOAD_MAX_BYTES = MAX_INBOUND_IMAGE_BYTES;
 const MULTIPART_OVERHEAD_BYTES = 512 * 1024;
+/** Total wall time allowed for reading one upload body: a trickling head must not wedge later uploads forever. */
+const UPLOAD_READ_TIMEOUT_MS = 60_000;
 const CONTROL_CHARS = /\p{Cc}/u;
 
 const FORBIDDEN_PATH_TOKENS =
@@ -23,7 +25,7 @@ export interface UploadedWebFile {
 
 export type WebUploadOutcome =
 	| { ok: true; path: string; files: UploadedWebFile[] }
-	| { ok: false; status: 400 | 403 | 413; error: string };
+	| { ok: false; status: 400 | 403 | 408 | 413; error: string };
 
 /** Directory holding inbound attachments uploaded via `/api/web/upload`. */
 export function webUploadRoot(homeDir: string): string {
@@ -47,7 +49,7 @@ function ensureSafeDir(dirPath: string): void {
 
 class UploadRefusedError extends Error {
 	constructor(
-		readonly status: 400 | 403 | 413,
+		readonly status: 400 | 403 | 408 | 413,
 		readonly code: string,
 	) {
 		super(code);
@@ -94,7 +96,7 @@ function safeExtension(filename: string, mime: string): string {
 	return "bin";
 }
 
-async function readBoundedBody(request: Request, maxBytes: number): Promise<Uint8Array> {
+async function readBoundedBody(request: Request, maxBytes: number, readTimeoutMs: number): Promise<Uint8Array> {
 	const rawLength = request.headers.get("content-length");
 	if (rawLength !== null) {
 		const declared = Number(rawLength);
@@ -104,9 +106,26 @@ async function readBoundedBody(request: Request, maxBytes: number): Promise<Uint
 	const reader = request.body.getReader();
 	const chunks: Uint8Array[] = [];
 	let total = 0;
+	// A client trickling bytes must not hold the upload queue forever: the whole body read has one deadline.
+	const deadline = Date.now() + readTimeoutMs;
 	try {
 		for (;;) {
-			const next = await reader.read();
+			const remaining = deadline - Date.now();
+			if (remaining <= 0) {
+				await reader.cancel().catch(() => undefined);
+				throw new UploadRefusedError(408, "upload_timeout");
+			}
+			let timer: ReturnType<typeof setTimeout> | undefined;
+			const next = await Promise.race([
+				reader.read(),
+				new Promise<never>((_resolve, reject) => {
+					timer = setTimeout(() => reject(new UploadRefusedError(408, "upload_timeout")), remaining);
+				}),
+			]).catch(async (error) => {
+				await reader.cancel().catch(() => undefined);
+				throw error;
+			});
+			clearTimeout(timer);
 			if (next.done) break;
 			if (next.value.byteLength === 0) continue;
 			total += next.value.byteLength;
@@ -177,8 +196,11 @@ export async function saveWebUpload(
 	request: Request,
 	homeDir: string,
 	userHome = homedir(),
+	options: { readTimeoutMs?: number | undefined } = {},
 ): Promise<WebUploadOutcome> {
-	const run = uploadQueue.then(() => saveWebUploadInner(request, homeDir, userHome));
+	const run = uploadQueue.then(() =>
+		saveWebUploadInner(request, homeDir, userHome, options.readTimeoutMs ?? UPLOAD_READ_TIMEOUT_MS),
+	);
 	// A refused upload must not break the chain for later ones.
 	uploadQueue = run.then(
 		() => undefined,
@@ -187,7 +209,12 @@ export async function saveWebUpload(
 	return run;
 }
 
-async function saveWebUploadInner(request: Request, homeDir: string, userHome = homedir()): Promise<WebUploadOutcome> {
+async function saveWebUploadInner(
+	request: Request,
+	homeDir: string,
+	userHome = homedir(),
+	readTimeoutMs: number = UPLOAD_READ_TIMEOUT_MS,
+): Promise<WebUploadOutcome> {
 	try {
 		const root = resolveUploadDir(homeDir, userHome);
 		const contentType = request.headers.get("content-type") ?? "";
@@ -195,7 +222,7 @@ async function saveWebUploadInner(request: Request, homeDir: string, userHome = 
 		const streamCap = isMultipart
 			? MAX_INBOUND_FILES * WEB_UPLOAD_MAX_BYTES + MULTIPART_OVERHEAD_BYTES
 			: WEB_UPLOAD_MAX_BYTES;
-		const body = await readBoundedBody(request, streamCap);
+		const body = await readBoundedBody(request, streamCap, readTimeoutMs);
 		const saved: UploadedWebFile[] = [];
 
 		if (isMultipart) {

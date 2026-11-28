@@ -135,12 +135,11 @@ export interface DeliverySource {
 		sentParts: number,
 		replyTs?: string,
 	): Promise<boolean | undefined> | boolean | undefined;
-	/**
-	 * This platform's rows the ledger expired since the last call (past the freshness window while pending), each handed
-	 * over once. Absent: expiry finishes nothing.
-	 */
+	/** This platform's rows the ledger expired since the last call (past the window while pending), handed over once.
+	 * Absent: expiry finishes nothing. */
 	takeExpired?(): Promise<DeliveryItem[]> | DeliveryItem[];
 	hasHeld?(threadRef: string, beforeDeliveryId: number): boolean | Promise<boolean>;
+	repostIsIdempotent?: boolean; // a recovered repost cannot duplicate here (web keys its messages), so no hold is needed
 	/** Rate limited (429 or still blocked): nothing more was posted; retry at `retry.at` without counting a failure. */
 	defer(deliveryId: number, error: string, retry: DeliveryRetry): Promise<void> | void;
 }

@@ -106,3 +106,26 @@ test("a stop that rejects resolves exited 1 with stop_failed", async () => {
 	expect(h.lines.some((line) => line.includes("event=stop_failed"))).toBe(true);
 	expect(h.exits).toEqual([]);
 });
+
+test("a second signal after the stop settled is ignored, never force-exits 1", async () => {
+	const h = harness(async () => {});
+	h.handle("SIGTERM");
+	expect(await h.exited).toBe(0);
+	h.handle("SIGTERM");
+	expect(h.exits).toEqual([]);
+	expect(h.lines.some((line) => line.includes("event=signal_after_stop signal=SIGTERM"))).toBe(true);
+	// sleep-ok: the handler force-exits synchronously; waiting past a tick proves no late exit comes.
+	await Bun.sleep(50);
+	expect(h.exits).toEqual([]);
+});
+
+test("a second signal after a failed stop settled is ignored too, the exited 1 stands", async () => {
+	const h = harness(async () => {
+		throw new Error("close failed");
+	});
+	h.handle("SIGTERM");
+	expect(await h.exited).toBe(1);
+	h.handle("SIGTERM");
+	expect(h.exits).toEqual([]);
+	expect(h.lines.some((line) => line.includes("event=signal_after_stop signal=SIGTERM"))).toBe(true);
+});

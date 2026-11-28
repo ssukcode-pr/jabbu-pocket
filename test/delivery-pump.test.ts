@@ -384,7 +384,7 @@ describe("qa50b K-13: a throwing ledger call", () => {
 		expect(calls).toEqual([
 			"send:21",
 			"confirm:21",
-			"afterSent:21",
+			"fail:21",
 			"send:22",
 			"fail:22",
 			"send:23",
@@ -393,6 +393,50 @@ describe("qa50b K-13: a throwing ledger call", () => {
 			"confirm:24",
 			"afterSent:24",
 		]);
-		expect(lines.filter((line) => line.includes("event=delivery_ledger_failed"))).toHaveLength(3);
+		expect(lines.filter((line) => line.includes("event=delivery_ledger_failed"))).toHaveLength(4);
+	});
+
+	test("a failed confirm holds the row as ambiguous instead of leaving it inflight for a resend", async () => {
+		const items = [item(31), item(32)];
+		const calls: string[] = [];
+		const lines: string[] = [];
+		const pump = new DeliveryPump({
+			source: {
+				claimDue: () => items,
+				confirm: (id) => {
+					calls.push(`confirm:${id}`);
+					if (id === 31) throw new Error("SQLITE_BUSY");
+				},
+				fail: (id, error, outcome, sentParts) => {
+					calls.push(`fail:${id}:${error}:${outcome}:${sentParts}`);
+					return true;
+				},
+				defer: (id) => void calls.push(`defer:${id}`),
+			},
+			sender: {
+				isBlocked: () => false,
+				blockedUntil: () => NOW,
+				blockedReason: () => "chat.postMessage",
+				send: async (d) => {
+					calls.push(`send:${d.deliveryId}`);
+					return { kind: "sent", parts: 2 };
+				},
+				afterSent: async (d) => void calls.push(`afterSent:${d.deliveryId}`),
+				afterUndelivered: async (d) => void calls.push(`undelivered:${d.deliveryId}`),
+			},
+			clock,
+			log: createLogger({ sink: (line) => lines.push(line), clock, redact }),
+		});
+		expect(await pump.pump()).toBe(1);
+		expect(calls).toEqual([
+			"send:31",
+			"confirm:31",
+			"fail:31:SQLITE_BUSY:ambiguous:2",
+			"undelivered:31",
+			"send:32",
+			"confirm:32",
+			"afterSent:32",
+		]);
+		expect(lines.filter((line) => line.includes("event=delivery_ledger_failed"))).toHaveLength(1);
 	});
 });
