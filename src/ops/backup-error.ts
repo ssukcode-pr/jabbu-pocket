@@ -6,6 +6,7 @@ export type BackupErrorCode =
 	| "vacuum_failed"
 	| "bundle_too_large"
 	| "bundle_failed"
+	| "backup_vanished"
 	| "backups_not_a_directory";
 
 export class BackupError extends Error {

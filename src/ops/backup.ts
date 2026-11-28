@@ -1,25 +1,22 @@
 import { Database } from "bun:sqlite";
-import { createHash } from "node:crypto";
 import {
 	chmodSync,
-	closeSync,
 	existsSync,
-	fsyncSync,
 	lstatSync,
 	mkdirSync,
-	openSync,
 	readdirSync,
 	readFileSync,
-	readSync,
 	realpathSync,
-	renameSync,
 	rmSync,
 	statSync,
 } from "node:fs";
 import { basename, join } from "node:path";
 import { BackupError } from "./backup-error";
+import { fsyncFile, fsyncPath, placeFile, sha256File } from "./backup-files";
 import { refuseSecretHardLink, secretInodes, treeBytes } from "./backup-tree";
 import { parseStampFields, parseStampTs, writeAtomic0600 } from "./stamp";
+
+export { fsyncPath, sha256File };
 
 /** Daily backup files live at `<home>/backups/jabbu-YYYYMMDD-HHMMSS.db`; the stamp sits next to them. */
 export const BACKUP_FILE_PATTERN = /^jabbu-\d{8}-\d{6}\.db$/;
@@ -78,46 +75,6 @@ function pad(n: number): string {
 /** Local-time stamp like `20261023-043000`, so file names sort chronologically. */
 export function backupStamp(date: Date): string {
 	return `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}-${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}`;
-}
-
-/** Bytes per readSync chunk when hashing a backup file: RAM stays at this size regardless of file size. */
-const HASH_CHUNK_BYTES = 1024 * 1024;
-
-export function sha256File(path: string): string {
-	const hash = createHash("sha256");
-	const buf = Buffer.alloc(HASH_CHUNK_BYTES);
-	const fd = openSync(path, "r");
-	try {
-		let position = 0;
-		for (;;) {
-			const read = readSync(fd, buf, 0, HASH_CHUNK_BYTES, position);
-			if (read === 0) break;
-			hash.update(read === HASH_CHUNK_BYTES ? buf : buf.subarray(0, read));
-			position += read;
-		}
-	} finally {
-		closeSync(fd);
-	}
-	return hash.digest("hex");
-}
-
-function fsyncFile(path: string): void {
-	const fd = openSync(path, "r+");
-	try {
-		fsyncSync(fd);
-	} finally {
-		closeSync(fd);
-	}
-}
-
-/** fsync through a read-only handle: works for a directory and for a file alike. */
-export function fsyncPath(path: string): void {
-	const fd = openSync(path, "r");
-	try {
-		fsyncSync(fd);
-	} finally {
-		closeSync(fd);
-	}
 }
 
 /** Atomic 0600 write: temp file + rename, so a half-written stamp is never observable. */
@@ -267,8 +224,8 @@ function createPendingBundle(
  *
  * The snapshot is made with SQLite `VACUUM INTO` from a read-only connection, so the live WAL/SHM sidecars are never
  * copied and the daemon does not have to be involved (or even running). The copy is written to a temp name, checked
- * with `PRAGMA quick_check`, and only then renamed into place - a failed backup never leaves a newest-mtime file
- * behind that a freshness check could mistake for a good one. The bundle is built and listed before either rename,
+ * with `PRAGMA quick_check`, and only then linked into place - a failed backup never leaves a newest-mtime file
+ * behind that a freshness check could mistake for a good one. The bundle is built and listed before either link,
  * so a bundle failure leaves no partial backup at all. The success stamp (`last-backup.ok`, including the bundle's
  * name and sha256) is written last, and pruning runs only after the new backup is on disk. `skipBundle` makes and
  * verifies the db snapshot alone and writes no stamp.
@@ -297,6 +254,9 @@ export function runBackup(options: BackupOptions): BackupResult {
 	const tmp = `${target}.tmp-${crypto.randomUUID()}`;
 
 	let bundle: PendingBundle | undefined;
+	// Targets this run linked into place: only those are this run's to remove on failure.
+	let placedDb = false;
+	let placedBundle = false;
 	try {
 		const source = new Database(dbPath, { readonly: true, strict: true });
 		try {
@@ -335,22 +295,29 @@ export function runBackup(options: BackupOptions): BackupResult {
 						options.maxBundleBytes ?? DEFAULT_MAX_BUNDLE_BYTES,
 						options.tarBin ?? "tar",
 					);
-		renameSync(tmp, target);
-		if (bundle !== undefined) renameSync(bundle.tmp, bundle.target);
+		placeFile(tmp, target);
+		placedDb = true;
+		if (bundle !== undefined) {
+			placeFile(bundle.tmp, bundle.target);
+			placedBundle = true;
+		}
 		fsyncPath(backupsDir);
 	} catch (error) {
 		rmSync(tmp, { force: true });
 		rmSync(`${tmp}-wal`, { force: true });
 		rmSync(`${tmp}-shm`, { force: true });
 		if (bundle !== undefined) rmSync(bundle.tmp, { force: true });
-		// The db rename may already have landed when a later step (the bundle rename) failed: a newest-mtime file
-		// behind would fake a good backup for the freshness check, so it goes too. Both targets were checked absent
-		// before the run, so deleting them cannot destroy a previous good backup.
-		rmSync(target, { force: true });
-		if (bundle !== undefined) rmSync(bundle.target, { force: true });
+		// A placed target without its bundle or stamp is a newest-mtime file that would fake a good backup, so
+		// this run's own placed files go too — but never a target another run placed.
+		if (placedDb) rmSync(target, { force: true });
+		if (bundle !== undefined && placedBundle) rmSync(bundle.target, { force: true });
 		throw error;
 	}
 
+	// A concurrent run can no longer delete this run's placed targets, but a prune (or an operator) still could:
+	// a vanished target is a BackupError, never a raw ENOENT, and no stamp is written for a missing file.
+	if (!existsSync(target) || (bundle !== undefined && !existsSync(bundle.target)))
+		throw new BackupError("backup_vanished", target);
 	const bytes = statSync(target).size;
 	const sha256 = sha256File(target);
 	const bundleBytes = bundle === undefined ? undefined : statSync(bundle.target).size;
@@ -366,9 +333,9 @@ export function runBackup(options: BackupOptions): BackupResult {
 				}\n`,
 			);
 		} catch (error) {
-			// Both targets were checked absent before the run: without their stamp they are leftovers, not a backup.
-			rmSync(target, { force: true });
-			if (bundle !== undefined) rmSync(bundle.target, { force: true });
+			// Without their stamp only this run's own placed files are leftovers, never another run's backup.
+			if (placedDb) rmSync(target, { force: true });
+			if (bundle !== undefined && placedBundle) rmSync(bundle.target, { force: true });
 			throw error;
 		}
 	}

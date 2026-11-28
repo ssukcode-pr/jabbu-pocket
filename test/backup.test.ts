@@ -17,6 +17,8 @@ import { dailyBackupNames, seedDb } from "./helpers/backup-fixtures";
 
 const sha256OfFile = (path: string): string => createHash("sha256").update(readFileSync(path)).digest("hex");
 
+const REPO_ROOT = join(import.meta.dir, "..");
+
 let home: string;
 
 beforeEach(() => {
@@ -401,23 +403,23 @@ describe("backup bundle (sessions + config.json)", () => {
 		expect(readdirSync(backupsDir).some((name) => BUNDLE_FILE_PATTERN.test(name))).toBe(false);
 	});
 
-	test("a bundle rename failure after the db rename leaves no newest-mtime file behind", async () => {
+	test("a bundle placement failure after the db placement leaves no newest-mtime file behind", async () => {
 		seedDb(home);
 		seedSources();
-		// The db rename (call 1) lands, the bundle rename (call 2) fails: the catch must remove both targets or a
-		// newest-mtime db survives that a freshness check could mistake for a good backup.
+		// The db link (call 1) lands, the bundle link (call 2) fails: the catch must remove this run's own placed
+		// db or a newest-mtime file survives that a freshness check could mistake for a good backup.
 		const original = { ...nodeFs };
-		let renames = 0;
+		let links = 0;
 		await mock.module("node:fs", () => ({
 			...original,
-			renameSync: (from: string, to: string) => {
-				renames += 1;
-				if (renames === 2) throw new Error(`rename #2 failed (injected): ${from} -> ${to}`);
-				return original.renameSync(from, to);
+			linkSync: (existingPath: string, newPath: string) => {
+				links += 1;
+				if (links === 2) throw new Error(`link #2 failed (injected): ${existingPath} -> ${newPath}`);
+				return original.linkSync(existingPath, newPath);
 			},
 		}));
 		try {
-			expect(() => runBackup({ homeDir: home, now: new Date(2026, 9, 23, 4, 30, 0) })).toThrow(/rename #2 failed/);
+			expect(() => runBackup({ homeDir: home, now: new Date(2026, 9, 23, 4, 30, 0) })).toThrow(/link #2 failed/);
 		} finally {
 			await mock.module("node:fs", () => original);
 		}
@@ -539,4 +541,117 @@ describe("backup bundle (sessions + config.json)", () => {
 		nodeFs.linkSync(join(home, "workspace", "a.md"), join(home, "workspace", "b.md"));
 		expect(runBackup({ homeDir: home, now: new Date(2026, 9, 26, 4, 32, 0) }).bundle).toBeDefined();
 	});
+});
+
+describe("concurrent same-second runBackup runs (r20 F2)", () => {
+	/** A ledger big enough that `VACUUM INTO` takes ~1.3s: both children are past the pre-check before either places its target. */
+	function seedLargeDb(): void {
+		seedDb(home);
+		const db = new Database(join(home, "jabbu.db"), { create: true, strict: true });
+		db.run("CREATE TABLE pad (id INTEGER PRIMARY KEY, data BLOB NOT NULL)");
+		const insert = db.prepare("INSERT INTO pad (data) VALUES (zeroblob(65536))");
+		db.transaction(() => {
+			for (let i = 0; i < 2048; i++) insert.run();
+		})();
+		db.close();
+	}
+
+	function seedBundleSources(): void {
+		mkdirSync(join(home, "sessions", "discord-dm-200000000000000001", "e1"), { recursive: true });
+		writeFileSync(
+			join(home, "sessions", "discord-dm-200000000000000001", "e1", "s.jsonl"),
+			'{"message":{"role":"user","content":"안녕"}}\n',
+		);
+		writeFileSync(join(home, "config.json"), '{"schemaVersion":1}\n', { mode: 0o600 });
+	}
+
+	/** A child that runs one `runBackup` and prints its result as JSON, or its error on stderr with exit 1. */
+	function writeChildScript(): string {
+		const script = join(home, "child-backup.ts");
+		writeFileSync(
+			script,
+			[
+				`import { runBackup } from ${JSON.stringify(join(REPO_ROOT, "src/ops/backup.ts"))};`,
+				"const [homeDir, nowMs, skipBundle] = process.argv.slice(2);",
+				"try {",
+				'	const result = runBackup({ homeDir, now: new Date(Number(nowMs)), skipBundle: skipBundle === "1" });',
+				"	console.log(JSON.stringify({ file: result.file, sha256: result.sha256, bundle: result.bundle ?? null }));",
+				"} catch (error) {",
+				"	console.error(error instanceof Error ? error.message : String(error));",
+				"	process.exit(1);",
+				"}",
+				"",
+			].join("\n"),
+		);
+		return script;
+	}
+
+	interface ChildOutcome {
+		code: number;
+		stdout: string;
+		stderr: string;
+	}
+
+	async function runChild(script: string, now: Date, skipBundle: boolean): Promise<ChildOutcome> {
+		const proc = Bun.spawn(["bun", script, home, String(now.getTime()), skipBundle ? "1" : "0"], {
+			stdin: "ignore",
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+		const [stdout, stderr, code] = await Promise.all([
+			new Response(proc.stdout).text(),
+			new Response(proc.stderr).text(),
+			proc.exited,
+		]);
+		return { code, stdout, stderr };
+	}
+
+	/** Two children with the same stamp, the second started while the first is mid-VACUUM; returns [winner, loser]. */
+	async function runConcurrent(script: string, now: Date, skipBundle: boolean): Promise<[ChildOutcome, ChildOutcome]> {
+		const first = runChild(script, now, skipBundle);
+		// Stagger the starts so the first child is mid-VACUUM when the second passes its pre-check; the second's
+		// VACUUM then ends after the first placed its target.
+		await Bun.sleep(300); // sleep-ok: stagger for the race window, not waiting on an event
+		const second = runChild(script, now, skipBundle);
+		const [a, b] = await Promise.all([first, second]);
+		return a.code === 0 ? [a, b] : [b, a];
+	}
+
+	test("the loser fails target_exists at placement and the winner's db survives", async () => {
+		seedLargeDb();
+		const script = writeChildScript();
+		const now = new Date(2026, 9, 23, 4, 30, 0);
+		const [winner, loser] = await runConcurrent(script, now, true);
+
+		expect(winner.code).toBe(0);
+		expect(loser.code).toBe(1);
+		expect(loser.stderr).toMatch(/target_exists/);
+		const result = JSON.parse(winner.stdout) as { file: string; sha256: string; bundle: string | null };
+		expect(result.bundle).toBeNull();
+		expect(existsSync(result.file)).toBe(true);
+		expect(sha256OfFile(result.file)).toBe(result.sha256);
+		expect(readdirSync(join(home, "backups")).filter((name) => name.includes(".tmp-"))).toEqual([]);
+	}, 120000);
+
+	test("with a bundle the loser never deletes the winner's verified backup", async () => {
+		seedLargeDb();
+		seedBundleSources();
+		const script = writeChildScript();
+		const now = new Date(2026, 9, 23, 4, 30, 0);
+		const [winner, loser] = await runConcurrent(script, now, false);
+
+		expect(winner.code).toBe(0);
+		expect(loser.code).toBe(1);
+		expect(loser.stderr).toMatch(/target_exists/);
+		const result = JSON.parse(winner.stdout) as { file: string; sha256: string; bundle: string | null };
+		expect(result.bundle).not.toBeNull();
+		expect(existsSync(result.file)).toBe(true);
+		expect(sha256OfFile(result.file)).toBe(result.sha256);
+		expect(existsSync(result.bundle as string)).toBe(true);
+		const stamp = readStamp(join(home, "backups"));
+		expect(stamp?.file).toBe(result.file.split("/").pop());
+		expect(stamp?.sha256).toBe(result.sha256);
+		expect(stamp?.bundle).toBe((result.bundle as string).split("/").pop());
+		expect(readdirSync(join(home, "backups")).filter((name) => name.includes(".tmp-"))).toEqual([]);
+	}, 120000);
 });
