@@ -92,6 +92,8 @@ const DEBOUNCE_MS = 200;
 const LIVE_INTERVAL_MS = 1000;
 /** At most this many distinct live origins at once: one origin is one daemon read per second while any stream is open. */
 const MAX_LIVE_CHANNELS = 32;
+/** At most this many `api/board/events` streams at once: each one costs a full board build at subscribe time. */
+const MAX_BOARD_STREAMS = 32;
 
 const COMMON_HEADERS = {
 	"cache-control": "no-store",
@@ -113,6 +115,8 @@ const snapshotEvent = (panel: BoardPanel): string => `event: snapshot\ndata: ${J
 interface BoardFanout {
 	/** Registers a stream's sender; the returned function removes it. */
 	add(send: (chunk: string) => void): () => void;
+	/** True while another stream may subscribe. */
+	canAdd(): boolean;
 }
 
 /**
@@ -136,6 +140,7 @@ function boardFanout(board: DashboardBoardOptions, panel: () => BoardPanel): Boa
 		else timer ??= setTimeout(flush, debounceMs);
 	};
 	return {
+		canAdd: () => senders.size < MAX_BOARD_STREAMS,
 		add(send) {
 			senders.add(send);
 			unsubscribe ??= board.source.onChange(changed);
@@ -194,20 +199,6 @@ function eventStream(
 	});
 	return new Response(body, {
 		headers: { ...COMMON_HEADERS, "content-type": "text/event-stream; charset=utf-8" },
-	});
-}
-
-/** `api/board/events`: one `snapshot` event at once and one per (debounced) board change, a comment line while idle. */
-function boardEvents(
-	request: Request,
-	board: DashboardBoardOptions,
-	fanout: BoardFanout,
-	panel: () => BoardPanel,
-): Response {
-	return eventStream(request, board.keepAliveMs ?? KEEP_ALIVE_MS, (send) => {
-		const remove = fanout.add(send);
-		send(snapshotEvent(panel()));
-		return remove;
 	});
 }
 
@@ -461,12 +452,18 @@ export function startDashboardServer(options: DashboardServerOptions): Server<un
 				const current = boardPanel();
 				return current.ok ? jsonReply(current, 200, head) : jsonReply({ error: current.error }, 503, head);
 			}
+			// `api/board/events`: one `snapshot` event at once and one per (debounced) board change.
 			if (route.BOARD_EVENTS.test(pathname)) {
+				if (!head && !fanout.canAdd()) return jsonReply({ error: "too_many_board_streams" }, 429, head);
 				return head
 					? new Response(null, {
 							headers: { ...COMMON_HEADERS, "content-type": "text/event-stream; charset=utf-8" },
 						})
-					: boardEvents(request, board, fanout, boardPanel);
+					: eventStream(request, board.keepAliveMs ?? KEEP_ALIVE_MS, (send) => {
+							const remove = fanout.add(send);
+							send(snapshotEvent(boardPanel()));
+							return remove;
+						});
 			}
 			heard(pane?.[1] === "trace" ? "trace" : "board_pane");
 			// The pane proxy needs only the live card, not the TASK-matched board view (no database read).

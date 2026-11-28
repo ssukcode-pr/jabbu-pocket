@@ -1302,6 +1302,7 @@ export class Daemon {
 	async stop(): Promise<void> {
 		if (this.#stopPromise === undefined) {
 			this.#stopped = true;
+			this.#review.stop();
 			this.#router?.stopDispatching();
 			// Stop monitors before any await so an in-flight sweep cannot start a new cron command.
 			this.#monitors?.stop();
@@ -1325,11 +1326,26 @@ export class Daemon {
 		await this.#pumping;
 		await this.#monitors?.idle();
 		await this.#drainRunningTurns();
+		await this.#reviewIdleBounded();
 		await this.#opsPanel.idle();
 		await this.#quota.idle();
 		await this.#router?.close();
 		this.#store?.close();
 		this.#log.info("daemon_stop", { boot: this.#options.bootId });
+	}
+
+	/**
+	 * The bounded wait for a running skill review: the fence in `stop()` starts nothing new, so this only waits out
+	 * a review already in flight (still orphaned past the bound); a candidate pass waits on a click, its writes done.
+	 */
+	async #reviewIdleBounded(): Promise<void> {
+		const boundMs = this.#options.stopDrainMs ?? STOP_DRAIN_MS;
+		if (boundMs <= 0) return;
+		const late = Promise.withResolvers<boolean>();
+		const timer = setTimeout(() => late.resolve(false), boundMs);
+		const done = await Promise.race([this.#review.idle().then(() => true), late.promise]);
+		clearTimeout(timer);
+		if (!done) this.#log.warn("stop_review_timeout", { boundMs });
 	}
 
 	/** The bounded wait between intake stop and child stop; a no-op when nothing runs or the bound is 0. */

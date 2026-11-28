@@ -657,6 +657,7 @@ export function deliverySources(
 	});
 	return (platform: ChatPlatform): DeliverySource => ({
 		claimDue: () => store.claimDue(undefined, platform).map(itemOf),
+		repostIsIdempotent: platform === "web",
 		takeExpired: () => store.takeExpired(platform).map(itemOf),
 		hasHeld: (threadRef, beforeDeliveryId) => store.hasHeldDelivery(threadRef, beforeDeliveryId),
 		confirm: (deliveryId) => {

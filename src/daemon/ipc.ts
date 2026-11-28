@@ -1,23 +1,22 @@
-import { chmodSync, rmSync } from "node:fs";
+import { chmodSync, lstatSync, rmSync } from "node:fs";
 import { StringDecoder } from "node:string_decoder";
-import { IPC_MAX_LINE_BYTES, type Outgoing, overCap, pump } from "./ipc-pump";
+import {
+	answerLine,
+	endWhenIdle,
+	IPC_MAX_LINE_BYTES,
+	newConnection,
+	type Outgoing,
+	overCap,
+	pump,
+	type ServerConnection,
+} from "./ipc-pump";
 
 /** The largest delay `setTimeout` keeps; a longer one is cut to 1 ms with a warning. */
 const MAX_TIMER_MS = 2 ** 31 - 1;
 
-interface ServerConnection {
-	/** Decodes across chunk boundaries, so a multibyte character split between two chunks stays whole. */
-	decoder: StringDecoder;
-	buffer: string;
-	/** Bytes of the request line so far, and whether it went over the cap. */
-	bytes: number;
-	dropped: boolean;
-	out: Outgoing;
-}
-
 export { IPC_MAX_LINE_BYTES };
 
-/** One JSON request line in, one JSON response line out, then the connection closes. */
+/** JSON request lines in, one JSON response line out per request, then the connection closes once the lines received are answered. */
 export type IpcHandler = (request: unknown) => Promise<unknown>;
 
 export interface IpcServer {
@@ -25,6 +24,11 @@ export interface IpcServer {
 }
 
 export function startIpcServer(path: string, handler: IpcHandler): IpcServer {
+	// A non-file at the socket path is never ours to remove (like the lock's notFile refusal); a symlink is unlinked as before,
+	// and so is a socket: a previous daemon's live socket (a restart in the same home) is stale once the lock is held.
+	const st = lstatSync(path, { throwIfNoEntry: false });
+	if (st !== undefined && !st.isFile() && !st.isSymbolicLink() && !st.isSocket())
+		throw new Error(`ipc socket path ${path} is not a regular file (remove or move it by hand)`);
 	rmSync(path, { force: true }); // the single-instance lock is held, so a leftover socket file is stale
 	// Created under umask 0177 so the socket is never visible with wider permissions, then pinned to 0600.
 	const previousUmask = process.umask(0o177);
@@ -34,16 +38,11 @@ export function startIpcServer(path: string, handler: IpcHandler): IpcServer {
 			unix: path,
 			socket: {
 				open(socket) {
-					socket.data = {
-						decoder: new StringDecoder("utf8"),
-						buffer: "",
-						bytes: 0,
-						dropped: false,
-						out: { rest: Buffer.alloc(0), endWhenDone: true },
-					};
+					socket.data = newConnection();
 				},
 				drain(socket) {
 					pump(socket, socket.data.out);
+					endWhenIdle(socket);
 				},
 				data(socket, chunk) {
 					if (overCap(socket.data, chunk, IPC_MAX_LINE_BYTES)) {
@@ -52,20 +51,16 @@ export function startIpcServer(path: string, handler: IpcHandler): IpcServer {
 						return;
 					}
 					socket.data.buffer += socket.data.decoder.write(chunk);
-					const newline = socket.data.buffer.indexOf("\n");
-					if (newline === -1) return;
-					const line = socket.data.buffer.slice(0, newline);
-					socket.data.buffer = "";
-					void (async () => {
-						let response: unknown;
-						try {
-							response = await handler(JSON.parse(line));
-						} catch (error) {
-							response = { ok: false, error: error instanceof Error ? error.message : String(error) };
-						}
-						socket.data.out.rest = Buffer.from(`${JSON.stringify(response)}\n`);
-						pump(socket, socket.data.out);
-					})();
+					// One request per line, answered in arrival order: the chain keeps a slow first request's
+					// reply (a second line used to overwrite it, or be dropped with the rest of the buffer).
+					for (;;) {
+						const newline = socket.data.buffer.indexOf("\n");
+						if (newline === -1) return;
+						const line = socket.data.buffer.slice(0, newline);
+						socket.data.buffer = socket.data.buffer.slice(newline + 1);
+						socket.data.pending += 1;
+						socket.data.queue = socket.data.queue.then(() => answerLine(socket, line, handler)).catch(() => undefined);
+					}
 				},
 			},
 		});
@@ -119,7 +114,7 @@ export async function callDaemonWhenUp(
 export async function callDaemon(path: string, request: unknown, timeoutMs = 120_000): Promise<unknown> {
 	const { promise, resolve, reject } = Promise.withResolvers<unknown>();
 	const decoder = new StringDecoder("utf8");
-	const out: Outgoing = { rest: Buffer.from(`${JSON.stringify(request)}\n`), endWhenDone: false };
+	const out: Outgoing = { rest: Buffer.from(`${JSON.stringify(request)}\n`) };
 	let buffer = "";
 	let settled = false;
 	const timer = setTimeout(
@@ -136,12 +131,8 @@ export async function callDaemon(path: string, request: unknown, timeoutMs = 120
 	const socket = await Bun.connect({
 		unix: path,
 		socket: {
-			open(s) {
-				pump(s, out);
-			},
-			drain(s) {
-				pump(s, out);
-			},
+			open: (s) => pump(s, out),
+			drain: (s) => pump(s, out),
 			data(_s, chunk) {
 				buffer += decoder.write(chunk);
 				const newline = buffer.indexOf("\n");

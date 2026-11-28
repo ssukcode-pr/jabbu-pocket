@@ -172,7 +172,7 @@ export interface MailboxDeps {
 	hostTools?: () => boolean;
 	/**
 	 * Live `costCap` from config, read per assistant call: `turnUsd` steers a turn at the ceiling and stops it at
-	 * 1.5x. Absent, or a key absent, = that ceiling is off. `dailyUsd` is not read here (`src/ops/cost-cap.ts`).
+	 * 3x. Absent, or a key absent, = that ceiling is off. `dailyUsd` is not read here (`src/ops/cost-cap.ts`).
 	 */
 	costCap?: () => { turnUsd?: number; dailyUsd?: number } | undefined;
 	/**

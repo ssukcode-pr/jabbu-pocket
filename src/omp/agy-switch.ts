@@ -13,6 +13,7 @@ import {
 } from "./agy-quota";
 import type { AgyToolKeepalive, AgyToolKeepaliveOptions } from "./agy-tool-keepalive";
 import type { OmpEntry, OmpEvent, OmpFinal, OmpTurnUsage, OmpUsage } from "./driver";
+import { OmpDriverError } from "./driver";
 import { buildChildEnv } from "./env";
 
 export interface AgyOmpDriverOptions {
@@ -108,7 +109,7 @@ export interface QuotaSwitchHost {
 	readonly retireChild: () => void;
 	readonly endClient: (client: AgyAcpClient) => Promise<void>;
 	readonly launch: (executable: string, env: Record<string, string>) => Promise<void>;
-	readonly sendPrompt: (client: AgyAcpClient, turn: PendingTurn, text: string) => void;
+	readonly sendPrompt: (client: AgyAcpClient, turn: PendingTurn, text: string, entry?: string) => void;
 	readonly finish: (turn: PendingTurn, final: Omit<OmpFinal, "usage">) => void;
 	readonly withRespawnLock: (fn: () => Promise<void>) => Promise<void>;
 }
@@ -153,6 +154,7 @@ export async function applyAgyConfig(params: {
 	originKey?: string;
 }): Promise<void> {
 	const target = resolveAgyConfigTarget(params);
+	const previousModel = params.option("model")?.currentValue;
 	if (target.modelId !== undefined) await params.setOption("model", target.modelId);
 	if (target.thinking === undefined) return;
 	if (params.option("thought_level") === undefined) {
@@ -163,10 +165,14 @@ export async function applyAgyConfig(params: {
 		});
 		return;
 	}
-	await params.setOption("thought_level", target.thinking);
+	await params.setOption("thought_level", target.thinking).catch(async (error: unknown) => {
+		if (previousModel !== undefined && previousModel !== target.modelId)
+			await params.setOption("model", previousModel).catch(() => {});
+		throw error;
+	});
 }
 
-/** Selects the account for a new ACP launch (`undefined` = pool off; throws when every account is blocked). */
+/** Selects the account for a new ACP launch (pool off = no account; throws when every account is blocked or the pool is configured but broken). */
 export function selectLaunchAccount(
 	options: AgyOmpDriverOptions,
 	now: number,
@@ -177,9 +183,7 @@ export function selectLaunchAccount(
 	if (picked === null) throw allAccountsExhaustedError(accounts, now, options.timezone);
 	if (picked === undefined) {
 		const err = accounts.status(now)?.error;
-		if (err !== undefined) {
-			options.log?.warn("agy.account.fallback_default", { origin: options.originKey, reason: err });
-		}
+		if (err !== undefined) throw new OmpDriverError("rpc_error", `agy account pool unavailable: ${err}`);
 		return {};
 	}
 	return { account: picked, appDataDir: accounts.prepareAccountDir(picked) };
@@ -378,7 +382,7 @@ export async function handleAgyQuotaSwitch(
 			});
 			turn.switching = false;
 			const retryPrompt = prependRotationContext(turn.originalPrompt, host.options.rotationContext?.() ?? null);
-			host.sendPrompt(nextClient, turn, retryPrompt);
+			host.sendPrompt(nextClient, turn, retryPrompt, turn.originalPrompt);
 		} catch (error) {
 			host.dropSession(true);
 			turn.usage.rotated = true;

@@ -572,7 +572,7 @@ describe("!distill (daemon)", () => {
 	let built: Array<{ origin: string; sessionDir: string; driver: FakeOmpDriver }>;
 	let holdReview: boolean;
 
-	async function boot(): Promise<Daemon> {
+	async function boot(opts: { stopDrainMs?: number } = {}): Promise<Daemon> {
 		const sessions = new FakeSessionStore();
 		const clock = { now: () => Date.now() };
 		const started = new Daemon({
@@ -590,7 +590,7 @@ describe("!distill (daemon)", () => {
 			}),
 			ompVersion: "omp-test 0",
 			bootId: "boot-distill",
-			stopDrainMs: 0,
+			stopDrainMs: opts.stopDrainMs ?? 0,
 			sweepMs: 3_600_000,
 			gateSweepMs: 0,
 			taskSweepMs: 0,
@@ -701,5 +701,25 @@ describe("!distill (daemon)", () => {
 		await transport.waitForPosts((text) => text.includes("동결 중이라 하지 않았습니다"));
 		expect(reviews()).toHaveLength(0);
 		expect(started.drainCounts().turns).toBe(0);
+	});
+
+	test("stop() waits for a running review: the review finishes before daemon_stop", async () => {
+		holdReview = true;
+		const started = await boot({ stopDrainMs: 5000 });
+		await chatThenSessionFile(started);
+		await started.inject({ origin: DM, asOwner: true, text: "!distill" });
+		await transport.waitForPosts((text) => text.includes("스킬 리뷰를 시작했습니다"));
+		await until(() => reviews().length === 1, "review driver");
+
+		const stopping = started.stop();
+		// sleep-ok: the review is held, so stop() must still be pending after this window.
+		expect(await Promise.race([stopping.then(() => "stopped"), Bun.sleep(300).then(() => "waiting")])).toBe("waiting");
+		reviews()[0]?.driver.release();
+		await stopping;
+		const noProposal = lines.findIndex((l) => l.includes("event=skill_review_no_proposal"));
+		const stopped = lines.findIndex((l) => l.includes("event=daemon_stop"));
+		expect(noProposal).toBeGreaterThanOrEqual(0);
+		expect(stopped).toBeGreaterThanOrEqual(0);
+		expect(noProposal).toBeLessThan(stopped);
 	});
 });

@@ -15,7 +15,7 @@ import { createLogger, type Logger } from "../src/log";
 import type { OmpEntry, OmpFinal } from "../src/omp/driver";
 import { FakeOmpDriver, FakeSessionStore } from "../src/omp/fake-driver";
 import type { UsageResponse } from "../src/omp/usage-json";
-import { writeQuotaLift } from "../src/ops/quota-gate";
+import { FALLBACK_QUOTA_RELEASE_MS, writeQuotaLift } from "../src/ops/quota-gate";
 import {
 	parseResetAtMs,
 	providerHeadroomStatus,
@@ -308,6 +308,38 @@ describe("QuotaRecoveryTracker and reset parsing", () => {
 		expect(restored.evaluateUsageRecovery(multi, 95, BASE_NOW + UNMETERED_QUOTA_HOLD_MS)).toEqual([
 			{ provider: "custom", origins: ["discord/dm/2"], reason: "unmetered_elapsed" },
 		]);
+	});
+
+	test("a hold with a known future resetAt is not released by the 5h safety timeout", () => {
+		const tracker = new QuotaRecoveryTracker();
+		const resetAt = BASE_NOW + 7 * 24 * 3_600_000; // weekly window
+		tracker.recordQuotaError({
+			provider: "anthropic",
+			originKey: "discord/dm/1",
+			reason: "429",
+			resetAt,
+			now: BASE_NOW,
+		});
+		// Past the 5h fallback the weekly hold still blocks and emits no safety_timeout release.
+		expect(tracker.holdForProvider("anthropic", BASE_NOW + FALLBACK_QUOTA_RELEASE_MS)).toBeDefined();
+		expect(tracker.checkLiftsAndExpiry(BASE_NOW + FALLBACK_QUOTA_RELEASE_MS)).toEqual([]);
+		expect(tracker.holdForProvider("anthropic", BASE_NOW + FALLBACK_QUOTA_RELEASE_MS)).toBeDefined();
+		// Once the known reset itself passes, the safety timeout may release it.
+		expect(tracker.checkLiftsAndExpiry(resetAt + 1)).toEqual([
+			{ provider: "anthropic", origins: ["discord/dm/1"], reason: "safety_timeout" },
+		]);
+		expect(tracker.holdForProvider("anthropic", resetAt + 1)).toBeUndefined();
+	});
+
+	test("a hold without a known resetAt still releases on the 5h safety timeout", () => {
+		const tracker = new QuotaRecoveryTracker();
+		tracker.recordQuotaError({ provider: "zai", originKey: "discord/dm/1", reason: "429", now: BASE_NOW });
+		expect(tracker.holdForProvider("zai", BASE_NOW + FALLBACK_QUOTA_RELEASE_MS - 1)).toBeDefined();
+		expect(tracker.checkLiftsAndExpiry(BASE_NOW + FALLBACK_QUOTA_RELEASE_MS - 1)).toEqual([]);
+		expect(tracker.checkLiftsAndExpiry(BASE_NOW + FALLBACK_QUOTA_RELEASE_MS)).toEqual([
+			{ provider: "zai", origins: ["discord/dm/1"], reason: "safety_timeout" },
+		]);
+		expect(tracker.holdForProvider("zai", BASE_NOW + FALLBACK_QUOTA_RELEASE_MS)).toBeUndefined();
 	});
 });
 

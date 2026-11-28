@@ -6,6 +6,7 @@ import { createInterface } from "node:readline";
 /**
  * Fake `agy acp` for wire tests: JSON-RPC 2.0 over stdio as agy 1.5.16 speaks it. Driven by env plus prompt markers:
  * - FAKE_AGY_LOG: argv, every in/out message and marker events are appended there as JSON lines.
+ * - FAKE_AGY_FLASH_LEVELS="low,medium": `gemini-3.8-flash` offers only those `thought_level` values.
  * - FAKE_AGY_UNKNOWN_SESSION=1: `session/load` fails like agy for a session it cannot find; a load that works replays
  *   the conversation as updates (a user chunk, an agent chunk, a tool call, usage 900/1000) before it answers.
  * - "@quota": streams agy's quota retry notice (RESOURCE_EXHAUSTED, code 429) split over two chunks and holds the
@@ -76,6 +77,13 @@ log({ dir: "argv", argv: process.argv.slice(2) });
 
 const MODELS = ["gemini-4-neon", "gemini-pro-orchestrator-neon", "gemini-3.8-flash"];
 const LEVELS = ["low", "medium", "high", "xhigh"];
+/** Narrowed `thought_level` set for gemini-3.8-flash (a model offering fewer levels than the persisted one). */
+const FLASH_LEVELS = (process.env.FAKE_AGY_FLASH_LEVELS ?? "")
+	.split(",")
+	.map((s) => s.trim())
+	.filter((s) => s !== "");
+const levelsFor = (name: string): readonly string[] =>
+	name === "gemini-3.8-flash" && FLASH_LEVELS.length > 0 ? FLASH_LEVELS : LEVELS;
 let model = "gemini-4-neon";
 let level = "high";
 let sessionId = "";
@@ -90,7 +98,11 @@ function configOptions(): Array<Record<string, unknown>> {
 		{ id: "mode", currentValue: "default", options: [{ value: "default", name: "Default" }] },
 	];
 	if (!model.includes("orchestrator")) {
-		options.splice(1, 0, { id: "thought_level", currentValue: level, options: LEVELS.map((value) => ({ value })) });
+		options.splice(1, 0, {
+			id: "thought_level",
+			currentValue: level,
+			options: levelsFor(model).map((value) => ({ value })),
+		});
 	}
 	return options;
 }
@@ -341,7 +353,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
 					}
 					model = value;
 				} else if (params.configId === "thought_level") {
-					if (model.includes("orchestrator") || !LEVELS.includes(value)) {
+					if (model.includes("orchestrator") || !levelsFor(model).includes(value)) {
 						return send({
 							id: message.id,
 							error: { code: -32602, message: `Thinking level "${value}" is not offered` },

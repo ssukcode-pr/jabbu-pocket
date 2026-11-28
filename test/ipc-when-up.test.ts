@@ -1,7 +1,7 @@
 // `callDaemonWhenUp`: a request that found nobody listening is sent again while the daemon restarts; a request that
 // went out is never repeated.
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -13,6 +13,7 @@ import {
 	IpcNotListening,
 	startIpcServer,
 } from "../src/daemon/ipc";
+import { overCap } from "../src/daemon/ipc-pump";
 
 /** A fake clock the fake sleep moves. */
 function clock() {
@@ -78,6 +79,55 @@ describe("callDaemonWhenUp", () => {
 				server.stop();
 			}
 		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("startIpcServer socket path", () => {
+	test("a directory at the socket path refuses with a remove-it-by-hand error and stays put", () => {
+		const dir = mkdtempSync(join(tmpdir(), "ipc-dir-"));
+		const path = join(dir, "jabbu.sock");
+		mkdirSync(path);
+		try {
+			expect(() => startIpcServer(path, async () => ({ ok: true }))).toThrow(
+				/ipc socket path .* is not a regular file \(remove or move it by hand\)/,
+			);
+			expect(statSync(path).isDirectory()).toBe(true);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("a symlink at the socket path is unlinked and the server answers; the target is untouched", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "ipc-link-"));
+		const target = join(dir, "target");
+		const path = join(dir, "jabbu.sock");
+		writeFileSync(target, "stale");
+		symlinkSync(target, path);
+		const server = startIpcServer(path, async () => ({ ok: true }));
+		try {
+			expect(await callDaemon(path, { op: "x" })).toEqual({ ok: true });
+			expect(readFileSync(target, "utf8")).toBe("stale");
+		} finally {
+			server.stop();
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("a live socket at the path is unlinked and the new server answers (a restart in the same home)", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "ipc-sock-"));
+		const path = join(dir, "jabbu.sock");
+		const first = startIpcServer(path, async () => ({ ok: "first" }));
+		try {
+			const second = startIpcServer(path, async () => ({ ok: "second" }));
+			try {
+				expect(await callDaemon(path, { op: "x" })).toEqual({ ok: "second" });
+			} finally {
+				second.stop();
+			}
+		} finally {
+			first.stop();
 			rmSync(dir, { recursive: true, force: true });
 		}
 	});
@@ -158,5 +208,90 @@ describe("startIpcServer input cap", () => {
 		expect(over.handled).toHaveLength(0);
 		expect(over.closedWithoutReply).toBe(true);
 		expect((await send(Buffer.from('{"op":"ping"}\n'))).handled).toEqual([{ op: "ping" }]);
+	});
+});
+
+describe("startIpcServer pipelining", () => {
+	/** A server whose first request is slow; the test resolves once two reply lines arrived. */
+	async function pipelined(send: (s: Bun.Socket<undefined>) => void): Promise<{ handled: unknown[]; replies: string }> {
+		const dir = mkdtempSync(join(tmpdir(), "ipc-pipe-"));
+		const path = join(dir, "s.sock");
+		const handled: unknown[] = [];
+		const server = startIpcServer(path, async (request) => {
+			handled.push(request);
+			const op = (request as { op?: string }).op;
+			// sleep-ok: the first handler must still be running when the second line arrives, so order proves serialization.
+			if (op === "slow") await Bun.sleep(100);
+			return { op };
+		});
+		try {
+			const chunks: string[] = [];
+			const done = Promise.withResolvers<void>();
+			const finish = () => {
+				if (
+					chunks
+						.join("")
+						.split("\n")
+						.filter((line) => line !== "").length >= 2
+				)
+					done.resolve();
+			};
+			await Bun.connect({
+				unix: path,
+				socket: {
+					open: send,
+					data(_s, chunk) {
+						chunks.push(chunk.toString());
+						finish();
+					},
+					close() {
+						done.resolve();
+					},
+					error() {
+						done.resolve();
+					},
+				},
+			});
+			// sleep-ok: upper bound on waiting for the pipelined replies.
+			await Promise.race([done.promise, Bun.sleep(5000)]);
+			return { handled, replies: chunks.join("") };
+		} finally {
+			server.stop();
+			rmSync(dir, { recursive: true, force: true });
+		}
+	}
+
+	test("two lines in one chunk are both answered, in order, even when the first handler is slow", async () => {
+		const { handled, replies } = await pipelined((s) => {
+			s.write(Buffer.from('{"op":"slow"}\n{"op":"fast"}\n'));
+		});
+		expect(handled).toEqual([{ op: "slow" }, { op: "fast" }]);
+		expect(replies).toBe('{"op":"slow"}\n{"op":"fast"}\n');
+	});
+
+	test("a second line sent while the first is still running is answered after it, not instead of it", async () => {
+		const { handled, replies } = await pipelined((s) => {
+			s.write(Buffer.from('{"op":"slow"}\n'));
+			// sleep-ok: the second line must arrive while the first handler still runs (100ms).
+			setTimeout(() => s.write(Buffer.from('{"op":"fast"}\n')), 10);
+		});
+		expect(handled).toEqual([{ op: "slow" }, { op: "fast" }]);
+		expect(replies).toBe('{"op":"slow"}\n{"op":"fast"}\n');
+	});
+});
+
+describe("overCap across pipelined lines", () => {
+	test("bytes after the first newline count toward the next line's cap", () => {
+		const state = { bytes: 0, dropped: false };
+		expect(overCap(state, Buffer.from("abc\n12345678"), 10)).toBe(false);
+		expect(state.bytes).toBe(8);
+		expect(overCap(state, Buffer.from("901\n"), 10)).toBe(true);
+	});
+
+	test("several complete lines in one chunk are each capped on their own", () => {
+		const state = { bytes: 0, dropped: false };
+		expect(overCap(state, Buffer.from("abc\ndef\n"), 10)).toBe(false);
+		expect(state.bytes).toBe(0);
+		expect(overCap(state, Buffer.from("12345678901\n"), 10)).toBe(true);
 	});
 });

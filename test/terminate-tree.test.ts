@@ -257,9 +257,71 @@ async function withSleeper(pidFile: string, body: (sleeper: number) => Promise<v
 	try {
 		await body(sleeper);
 	} finally {
-		if (!gone(sleeper)) process.kill(sleeper, "SIGKILL");
+		killIfAlive(sleeper);
 	}
 }
+
+/**
+ * SIGKILLs `pid` unless it is gone. The check and the kill are two steps, so the sleeper can die between them: that
+ * ESRCH is the state wanted, not a failure. Any other error is still thrown. `isGone` and `kill` are injectable so the
+ * race can be forced.
+ */
+function killIfAlive(
+	pid: number,
+	isGone: (pid: number) => boolean = gone,
+	kill: (pid: number, signal: "SIGKILL") => void = (target, signal) => void process.kill(target, signal),
+): void {
+	if (isGone(pid)) return;
+	try {
+		kill(pid, "SIGKILL");
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+	}
+}
+
+describe("killIfAlive (the cleanup of a real-tree test)", () => {
+	const errno = (code: string): Error => Object.assign(new Error(code), { code });
+
+	test("a sleeper that dies between the check and the kill (ESRCH) is not an error", () => {
+		const signalled: number[] = [];
+		killIfAlive(
+			4242,
+			() => false,
+			(pid) => {
+				signalled.push(pid);
+				throw errno("ESRCH");
+			},
+		);
+		expect(signalled).toEqual([4242]);
+	});
+
+	test("any other kill error is still thrown", () => {
+		expect(() =>
+			killIfAlive(
+				4242,
+				() => false,
+				() => {
+					throw errno("EPERM");
+				},
+			),
+		).toThrow("EPERM");
+	});
+
+	test("a live sleeper is signalled once with SIGKILL, a gone one never", () => {
+		const calls: Array<[number, string]> = [];
+		killIfAlive(
+			7,
+			() => false,
+			(pid, signal) => void calls.push([pid, signal]),
+		);
+		killIfAlive(
+			8,
+			() => true,
+			(pid, signal) => void calls.push([pid, signal]),
+		);
+		expect(calls).toEqual([[7, "SIGKILL"]]);
+	});
+});
 
 describe("a real tree", () => {
 	// Not skipped: on a host that cannot build the tree these tests fail instead of passing unrun.

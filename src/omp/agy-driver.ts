@@ -257,7 +257,6 @@ export class AgyOmpDriver implements OmpSessionDriver {
 	async switchSession(sessionFile: string): Promise<{ cancelled: boolean }> {
 		this.#requireStarted();
 		const stem = parseAgySessionStem(sessionFile);
-		writeAgyPointer(this.#options.sessionDir, this.#pointerPath, stem);
 		this.#switchedBeforePrompt = false;
 		await this.#spawn(stem, "session switch");
 		return { cancelled: false };
@@ -323,7 +322,7 @@ export class AgyOmpDriver implements OmpSessionDriver {
 	async state(): Promise<OmpState> {
 		const model = this.#option("model")?.currentValue ?? this.#userModel ?? this.#account?.model ?? this.#defaultModel;
 		const thinking = this.#option("thought_level")?.currentValue;
-		const c = this.#context;
+		const c = this.#sessionId === undefined ? undefined : this.#context;
 		return {
 			sessionId: this.#sessionId ?? "",
 			idle: this.#turn === undefined,
@@ -429,13 +428,7 @@ export class AgyOmpDriver implements OmpSessionDriver {
 		if (accounts !== undefined) {
 			const now = this.#now();
 			const wanted = accounts.selectAvailable(now);
-			if (wanted === null) {
-				if (this.#client || readAgyPointer(this.#pointerPath) !== undefined) {
-					this.#dropSession(true);
-					this.#retireChild();
-				}
-				throw allAccountsExhaustedError(accounts, now, this.#options.timezone);
-			}
+			if (wanted === null) throw allAccountsExhaustedError(accounts, now, this.#options.timezone);
 			if (this.#client && shouldSwitchAgyAccount(this.#account, wanted, accounts, now)) {
 				this.#dropSession(true);
 				return this.#spawn(undefined, "account switch");
@@ -537,6 +530,7 @@ export class AgyOmpDriver implements OmpSessionDriver {
 			});
 		} catch (error) {
 			await this.#dropClient(client);
+			this.#account = undefined;
 			const stderr = client.stderrTail.trim().slice(-400);
 			throw new OmpDriverError("rpc_error", `agy acp start failed: ${String(error)}${stderr ? ` | ${stderr}` : ""}`, {
 				cause: error,
@@ -697,8 +691,8 @@ export class AgyOmpDriver implements OmpSessionDriver {
 	// ---- prompts ----
 
 	/** Records the user entry (text only), then sends `session/prompt` with the attached images the child takes. */
-	#sendPrompt(client: AgyAcpClient, turn: PendingTurn, text: string): void {
-		this.#entries.push({ id: `ag-${++this.#entrySeq}`, type: "message", message: { role: "user", content: text } });
+	#sendPrompt(client: AgyAcpClient, turn: PendingTurn, text: string, entry: string = text): void {
+		this.#entries.push({ id: `ag-${++this.#entrySeq}`, type: "message", message: { role: "user", content: entry } });
 		const prompt: Array<Record<string, unknown>> = [{ type: "text", text }];
 		const { inboundRoot, log, originKey } = this.#options;
 		if (!this.#imageInput || inboundRoot === undefined) this.#request(client, turn, prompt);
@@ -761,7 +755,7 @@ export class AgyOmpDriver implements OmpSessionDriver {
 		}
 		const dropped = (turn.droppedSteers ?? 0) + this.#queued.length;
 		const end = promptReplyEnd({ ...turn, stopReason, failure, dropped });
-		if (this.#context !== undefined) turn.usage.contextTokens = this.#context.used;
+		if (this.#context !== undefined && this.#usageUpdatedThisTurn) turn.usage.contextTokens = this.#context.used;
 		// Before the final: a prompt sent on it must already find the conversation dropped.
 		turn.usage.rotated = this.#rotateIfFull(turn.usage.calls);
 		this.#finish(turn, { opRef: turn.opRef, text: turn.text, ...end });
@@ -801,7 +795,7 @@ export class AgyOmpDriver implements OmpSessionDriver {
 				retireChild: () => this.#retireChild(),
 				endClient: (old) => this.#dropClient(old),
 				launch: (executable, env) => this.#launch(executable, env, undefined),
-				sendPrompt: (nextClient, activeTurn, text) => this.#sendPrompt(nextClient, activeTurn, text),
+				sendPrompt: (client, turn, text, entry) => this.#sendPrompt(client, turn, text, entry),
 				finish: (activeTurn, final) => this.#finish(activeTurn, final),
 				withRespawnLock: (fn) => this.#withRespawnLock(fn),
 			},
@@ -835,14 +829,14 @@ export class AgyOmpDriver implements OmpSessionDriver {
 			this.#options.log?.warn("agy_rotation_blind", { origin: this.#options.originKey, calls });
 		}
 		if (context === undefined || context.size <= 0 || context.used < context.size * AGY_ROTATE_RATIO) return false;
-		this.#dropSession(false);
-		this.#retireChild();
 		this.#options.log?.info("agy_conversation_rotated", {
 			origin: this.#options.originKey,
 			conversationId: this.#sessionId,
 			contextTokens: context.used,
 			window: context.size,
 		});
+		this.#dropSession(false);
+		this.#retireChild();
 		return true;
 	}
 

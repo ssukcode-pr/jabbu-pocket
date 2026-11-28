@@ -113,6 +113,22 @@ export function fatalHandler(
 }
 
 /**
+ * SIGHUP reload: a throw inside `reloadConfig` (a closed or busy store when the signal lands mid-shutdown,
+ * a quota poll hitting the same store) must not become a fatal exit — the IPC `reload` op already answers
+ * `{ ok: false }` for the same failure, and `reloadConfig` itself only guards the config load.
+ */
+export function reloadOnSighup(daemon: Daemon, log: Logger): void {
+	try {
+		daemon.reloadConfig("sighup");
+	} catch (error) {
+		log.warn("config_reload_failed", {
+			trigger: "sighup",
+			error: error instanceof Error ? error.message : String(error),
+		});
+	}
+}
+
+/**
  * `jabbu-pocket daemon`: holds the single-instance lock, runs until SIGTERM/SIGINT, then stops gracefully.
  * Resolves with the process exit code.
  */
@@ -248,7 +264,7 @@ export async function runDaemon(
 		process.on(signal, () => {
 			if (signal !== "SIGHUP") return shutdown.handle(signal);
 			log.info("signal", { signal });
-			daemon.reloadConfig("sighup");
+			reloadOnSighup(daemon, log);
 		});
 	}
 	// Before `start()`: a main thread stuck while booting is killed too.

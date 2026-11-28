@@ -249,6 +249,22 @@ describe("board event fan-out", () => {
 		await client.close();
 	});
 
+	test("AC-6: the 33rd concurrent board event stream is refused with 429, and closing all frees the board", async () => {
+		const { base, source } = setup();
+		const clients = await Promise.all(Array.from({ length: 32 }, () => EventStream.open(base)));
+		for (const client of clients) expect(await client.nextName()).toBe("v1");
+		const refused = await fetch(`${base}/api/board/events`);
+		expect(refused.status).toBe(429);
+		expect(await refused.json()).toEqual({ error: "too_many_board_streams" });
+		// Closing every stream unsubscribes the fan-out (AC-5's signal); a new stream is accepted again.
+		const gone = source.unheard();
+		await Promise.all(clients.map((client) => client.close()));
+		await gone;
+		const again = await EventStream.open(base);
+		expect(await again.nextName()).toBe("v1");
+		await again.close();
+	});
+
 	test("AC-5: once every stream is gone a board change reads nothing; a new stream hears changes again", async () => {
 		const { base, source, tasksCalls } = setup({ debounceMs: 0, keepAliveMs: 10 });
 		const clients = await Promise.all([1, 2].map(() => EventStream.open(base)));

@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { startDashboardServer } from "../src/dashboard/server";
 import type { DashboardSnapshot } from "../src/dashboard/snapshot";
+import { createWebAuthState, issueCsrfCookie, verifyWebCsrf } from "../src/web/auth";
 import type { WebDashboardOptions } from "../src/web/routes";
 
 type Jwk = webcrypto.JsonWebKey & { kid?: string; use?: string; alg?: string };
@@ -167,6 +168,7 @@ describe("AC-2: web authentication, loopback enforcement, local token, and CSRF"
 			aud: AUD,
 			iss: `https://${TEAM_DOMAIN}`,
 			exp: nowSec() + 300,
+			iat: nowSec() - 10,
 			nbf: nowSec() - 5,
 			email: "Owner@Example.com",
 		});
@@ -204,6 +206,27 @@ describe("AC-2: web authentication, loopback enforcement, local token, and CSRF"
 				signJwt(rsa1.privateKey, "RS256", "kid-rsa-1", { ...baseClaims(), exp: nowSec() - 1 }),
 				401,
 				"jwt_expired",
+			],
+			[
+				"missing_iat",
+				signJwt(rsa1.privateKey, "RS256", "kid-rsa-1", { ...baseClaims(), iat: undefined }),
+				401,
+				"jwt_invalid_iat",
+			],
+			[
+				"future_iat",
+				signJwt(rsa1.privateKey, "RS256", "kid-rsa-1", { ...baseClaims(), iat: nowSec() + 3600 }),
+				401,
+				"jwt_not_yet_valid",
+			],
+			[
+				"lifetime_too_long",
+				signJwt(rsa1.privateKey, "RS256", "kid-rsa-1", {
+					...baseClaims(),
+					exp: nowSec() + 24 * 60 * 60 + 600,
+				}),
+				401,
+				"jwt_lifetime_too_long",
 			],
 			[
 				"wrong_aud",
@@ -244,6 +267,16 @@ describe("AC-2: web authentication, loopback enforcement, local token, and CSRF"
 			expect(await res.json()).toEqual({ error: expectedError });
 		}
 
+		// A token living exactly 24 h is still accepted.
+		const edgeJwt = await signJwt(rsa1.privateKey, "RS256", "kid-rsa-1", {
+			...baseClaims(),
+			exp: nowSec() - 10 + 24 * 60 * 60,
+		});
+		const edgeRes = await fetch(`${baseUrl}/api/web/conversations`, {
+			headers: { "cf-access-jwt-assertion": edgeJwt },
+		});
+		expect(edgeRes.status).toBe(200);
+
 		// Key rotation after cooldown passes using ES256
 		nowMs += 15_000;
 		keys.push(ec1.publicJwk);
@@ -282,6 +315,44 @@ describe("AC-2: web authentication, loopback enforcement, local token, and CSRF"
 		).toBe(401);
 	});
 
+	test("a stale Bearer token falls through to the Access JWT instead of short-circuiting with 401", async () => {
+		const rsa = await generateSigningKey("RS256", "kid-rsa-1");
+		const rsaOther = await generateSigningKey("RS256", "kid-rsa-1");
+		const { baseUrl } = startAuthServer({ keys: [rsa.publicJwk] });
+		const claims = {
+			aud: AUD,
+			iss: `https://${TEAM_DOMAIN}`,
+			exp: Math.floor(Date.now() / 1000) + 300,
+			iat: Math.floor(Date.now() / 1000) - 10,
+			email: OWNER_EMAIL,
+		};
+		const validJwt = await signJwt(rsa.privateKey, "RS256", "kid-rsa-1", claims);
+		const badJwt = await signJwt(rsaOther.privateKey, "RS256", "kid-rsa-1", claims);
+
+		// Stale local token + valid JWT: the JWT authenticates.
+		expect(
+			(
+				await fetch(`${baseUrl}/api/web/conversations`, {
+					headers: { authorization: "Bearer stale-token", "cf-access-jwt-assertion": validJwt },
+				})
+			).status,
+		).toBe(200);
+
+		// Stale local token + invalid JWT: the JWT's own error is reported, not invalid_token.
+		const badRes = await fetch(`${baseUrl}/api/web/conversations`, {
+			headers: { authorization: "Bearer stale-token", "cf-access-jwt-assertion": badJwt },
+		});
+		expect(badRes.status).toBe(401);
+		expect(await badRes.json()).toEqual({ error: "invalid_jwt_signature" });
+
+		// Stale local token alone: still 401 invalid_token, not auth_required.
+		const aloneRes = await fetch(`${baseUrl}/api/web/conversations`, {
+			headers: { authorization: "Bearer stale-token" },
+		});
+		expect(aloneRes.status).toBe(401);
+		expect(await aloneRes.json()).toEqual({ error: "invalid_token" });
+	});
+
 	test("POST requires Sec-Fetch-Site: same-origin and signed CSRF cookie matching X-Jabbu-Csrf", async () => {
 		const rsa = await generateSigningKey("RS256", "kid-rsa-1");
 		const daemonCalls: unknown[] = [];
@@ -290,6 +361,7 @@ describe("AC-2: web authentication, loopback enforcement, local token, and CSRF"
 			aud: AUD,
 			iss: `https://${TEAM_DOMAIN}`,
 			exp: Math.floor(Date.now() / 1000) + 300,
+			iat: Math.floor(Date.now() / 1000) - 10,
 			email: OWNER_EMAIL,
 		});
 		const localHeaders = { authorization: "Bearer local-secret-token-xyz" };
@@ -368,5 +440,41 @@ describe("AC-2: web authentication, loopback enforcement, local token, and CSRF"
 		});
 		expect(newRes.status).toBe(200);
 		expect(daemonCalls).toEqual([{ op: "web_new", title: "합법 새 대화" }]);
+	});
+
+	test("CSRF tokens carry an issued-at and expire after 24 h", async () => {
+		let nowMs = 1_700_000_000_000;
+		const state = createWebAuthState({
+			ownerEmails: [OWNER_EMAIL],
+			accessTeamDomain: TEAM_DOMAIN,
+			accessAud: AUD,
+			localTokenPath: "unused",
+			now: () => nowMs,
+			csrfSecret: CSRF_SECRET,
+		});
+		const { token } = issueCsrfCookie(new Request("http://x/"), state);
+		expect(token).toMatch(/^[0-9a-f]{32}\.[0-9a-f]{64}$/);
+		const post = () =>
+			verifyWebCsrf(
+				new Request("http://x/api/web/new", {
+					method: "POST",
+					headers: {
+						"sec-fetch-site": "same-origin",
+						cookie: `jabbu_csrf=${token}`,
+						"x-jabbu-csrf": token,
+					},
+				}),
+				state,
+			);
+		expect(post()).toEqual({ ok: true });
+		// Reused while still fresh, and still valid at exactly 24 h.
+		const again = new Request("http://x/", { headers: { cookie: `jabbu_csrf=${token}` } });
+		expect(issueCsrfCookie(again, state).token).toBe(token);
+		nowMs += 24 * 60 * 60 * 1000;
+		expect(post()).toEqual({ ok: true });
+		// One second past the window it no longer verifies, and issue mints a fresh token instead.
+		nowMs += 1000;
+		expect(post()).toEqual({ ok: false, error: "csrf_mismatch" });
+		expect(issueCsrfCookie(again, state).token).not.toBe(token);
 	});
 });
